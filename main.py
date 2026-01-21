@@ -27,8 +27,8 @@ FB_URL = os.environ.get('FIREBASE_DATABASE_URL')
 RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL')
 PORT = int(os.environ.get('PORT', '8080'))
 
-# --- Groq Keys Setup (Updated from Gemini) ---
-KEY_ENV = os.environ.get('GROQ_API_KEY', '') # এনভায়রনমেন্টে GROQ_API_KEY নামে কি সেভ করবেন
+# --- Groq Keys Setup ---
+KEY_ENV = os.environ.get('GROQ_API_KEY', '')
 GROQ_KEYS = [k.strip() for k in KEY_ENV.split(',') if k.strip()]
 CURRENT_KEY_INDEX = 0
 
@@ -50,7 +50,7 @@ except Exception as e:
 def is_owner(uid):
     return str(uid) == str(OWNER_ID)
 
-# --- AI Helper Functions (Updated to Groq) ---
+# --- Groq AI Helper ---
 def get_next_api_key():
     global CURRENT_KEY_INDEX
     if not GROQ_KEYS: return None
@@ -59,210 +59,143 @@ def get_next_api_key():
     return key
 
 async def get_expanded_keywords(base_kw):
-    """
-    AI আপডেট: এখন Groq LPU ব্যবহার করে অবিশ্বাস্য দ্রুত গতিতে কিওয়ার্ড জেনারেট হবে।
-    প্রথমে llama-3.3-70b -> ব্যর্থ হলে llama3-8b -> ব্যর্থ হলে mixtral-8x7b
-    """
-    if not GROQ_KEYS:
-        logger.warning("⚠️ No Groq Keys found!")
-        return [base_kw]
-
-    # Groq মডেলের তালিকা
+    if not GROQ_KEYS: return [base_kw]
     models_to_try = ["llama-3.3-70b-versatile", "llama3-8b-8192", "mixtral-8x7b-32768"]
     
     for i in range(len(GROQ_KEYS)):
         api_key = get_next_api_key()
         if not api_key: break
-
         for model in models_to_try:
             url = "https://api.groq.com/openai/v1/chat/completions"
-            
-            prompt = f"Generate 100 unique, broad, and popular search phrases for Google Play Store to find new and unrated apps related to '{base_kw}'. Focus on terms that return maximum results. Provide only comma-separated values."
-            
-            payload = {
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.7
-            }
-            headers = {
-                'Authorization': f'Bearer {api_key}',
-                'Content-Type': 'application/json'
-            }
-
+            prompt = f"Generate 100 unique search phrases for Play Store related to '{base_kw}'. CSV only."
+            payload = {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.7}
+            headers = {'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'}
             try:
                 async with aiohttp.ClientSession() as session:
-                    async with session.post(url, headers=headers, json=payload) as response:
+                    async with session.post(url, headers=headers, json=payload, timeout=10) as response:
                         if response.status == 200:
                             res_json = await response.json()
-                            try:
-                                text_data = res_json['choices'][0]['message']['content']
-                                kws = [k.strip() for k in text_data.split(',') if k.strip()]
-                                final_list = list(set([base_kw] + kws))[:100]
-                                logger.info(f"✅ Groq Success with Model: {model}")
-                                return final_list
-                            except Exception:
-                                continue
-                        elif response.status == 429:
-                            logger.warning(f"⚠️ Groq Rate Limited on {model}. Switching key...")
-                            break 
-                        else:
-                            continue 
-            except Exception as e:
-                logger.error(f"Groq Connection Error on {model}: {e}")
-                continue
-
-    logger.error("❌ All Groq attempts failed. Using base keyword.")
+                            text_data = res_json['choices'][0]['message']['content']
+                            kws = [k.strip() for k in text_data.split(',') if k.strip()]
+                            return list(set([base_kw] + kws))[:100]
+            except: continue
     return [base_kw]
 
-# --- Helper: Fetch Keyword & Trigger Search ---
+# --- শক্তিশালী স্টপ চেক ফাংশন ---
+def check_stop(context):
+    return context.user_data.get('stop_signal', False)
+
+# --- Auto Search Entry ---
 async def execute_auto_search(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
-    if context.user_data.get('stop_signal'):
+    if check_stop(context):
         context.user_data['auto_loop'] = False
-        context.user_data['stop_signal'] = False
-        await context.bot.send_message(chat_id=chat_id, text="🛑 অটো সার্চ পুরোপুরি থামানো হয়েছে।")
+        await context.bot.send_message(chat_id=chat_id, text="🛑 অটো সার্চ থামানো হয়েছে।")
         return
 
     try:
         keywords_ref = fs_client.collection('artifacts').document(FIRESTORE_APP_ID)\
             .collection('public').document('data').collection('keywords')
-        
         docs = keywords_ref.limit(1).get()
         
         if docs:
             doc = docs[0]
-            data = doc.to_dict()
-            keyword = data.get('word')
+            keyword = doc.to_dict().get('word')
             doc.reference.delete()
-            
             context.user_data['from_cloud'] = True
             await scrape_task(keyword, context, chat_id)
         else:
             context.user_data['auto_loop'] = False 
-            await context.bot.send_message(chat_id=chat_id, text="⚠️ ফায়ারবেসে আর কোনো কিওয়ার্ড নেই। অটো সার্চ সমাপ্ত।")
-            
+            await context.bot.send_message(chat_id=chat_id, text="⚠️ ফায়ারবেস খালি।")
     except Exception as e:
-        logger.error(f"Firestore Fetch Error: {e}")
+        logger.error(f"Error: {e}")
         context.user_data['auto_loop'] = False
-        await context.bot.send_message(chat_id=chat_id, text=f"⚠️ এরর: {e}")
 
-# --- Global Scraper Engine ---
+# --- Main Engine (Strong Intervention) ---
 async def scrape_task(base_kw, context, uid):
     context.user_data['stop_signal'] = False
-    
     keywords = await get_expanded_keywords(base_kw)
     countries = ['us', 'gb', 'in', 'ca', 'br', 'au', 'de', 'id', 'ph', 'pk', 'za', 'mx', 'tr', 'sa', 'ae', 'ru', 'fr', 'it', 'es', 'nl'] 
     
-    stop_btn = [[InlineKeyboardButton("🛑 Stop Auto Search", callback_data='stop_loop')]]
-    
-    msg_text = f"🌍 **মেগা সার্চ শুরু (Groq AI)!** \n🔍 নিস: {base_kw}\n🎯 কিওয়ার্ড: {len(keywords)}টি"
-    if context.user_data.get('from_cloud'): msg_text += "\n(Cloud Keyword)"
-    
-    status_msg = await context.bot.send_message(uid, msg_text, reply_markup=InlineKeyboardMarkup(stop_btn))
+    stop_btn = [[InlineKeyboardButton("🛑 STOP IMMEDIATELY", callback_data='stop_loop')]]
+    status_msg = await context.bot.send_message(uid, f"🚀 সার্চ শুরু: {base_kw}\n🎯 কিওয়ার্ড: {len(keywords)}", reply_markup=InlineKeyboardMarkup(stop_btn))
     
     new_count = 0
     session_leads = []
     ref = db.reference('scraped_emails')
     processed_apps = set()
 
-    for kw in keywords:
-        if context.user_data.get('stop_signal'): break
+    try:
+        for kw in keywords:
+            # লেভেল ১ স্টপ চেক (কিওয়ার্ড পরিবর্তনকালে)
+            if check_stop(context): break
+            
+            for lang_country in countries:
+                # লেভেল ২ স্টপ চেক (কান্ট্রি পরিবর্তনকালে)
+                if check_stop(context): break
+                
+                try:
+                    # n_hits কমিয়ে ২৫ করা হয়েছে দ্রুত রেসপন্সের জন্য (বড় লুপ হলে বাটন কাজ করতে দেরি করে)
+                    results = play_search(kw, n_hits=25, lang='en', country=lang_country) 
+                    if not results: continue
 
-        for lang_country in countries:
-            if context.user_data.get('stop_signal'): break
+                    for r in results:
+                        # লেভেল ৩ স্টপ চেক (প্রতিটি অ্যাপ প্রসেসিংকালে - সবচাইতে পাওয়ারফুল)
+                        if check_stop(context): break
+                        
+                        await asyncio.sleep(0) # ইভেন্ট লুপকে বাটন ক্লিকের সুযোগ দেয়
+                        
+                        app_id = r['appId']
+                        if app_id in processed_apps: continue
+                        processed_apps.add(app_id)
 
-            try:
-                results = play_search(kw, n_hits=250, lang='en', country=lang_country) 
-                if not results: continue
+                        try:
+                            app = app_details(app_id, lang='en', country=lang_country)
+                            if app and app.get('developerEmail'):
+                                email_raw = app['developerEmail'].lower().strip()
+                                if (app.get('score', 0) or 0) == 0:
+                                    email_key = email_raw.replace('.', '_').replace('@', '_at_')
+                                    if not ref.child(email_key).get():
+                                        data = {
+                                            'app_name': app.get('title'),
+                                            'email': email_raw,
+                                            'installs': app.get('installs'),
+                                            'country': lang_country,
+                                            'timestamp': datetime.now().isoformat()
+                                        }
+                                        ref.child(email_key).set(data)
+                                        session_leads.append(data)
+                                        new_count += 1
+                        except: continue
+                except: continue
+    except Exception as e:
+        logger.error(f"Task Error: {e}")
 
-                for r in results:
-                    if context.user_data.get('stop_signal'): break
-
-                    app_id = r['appId']
-                    if app_id in processed_apps: continue
-                    processed_apps.add(app_id)
-
-                    try:
-                        app = app_details(app_id, lang='en', country=lang_country)
-                        if app and app.get('developerEmail'):
-                            email_raw = app['developerEmail'].lower().strip()
-                            score = app.get('score', 0)
-                            reviews = app.get('reviews', 0)
-
-                            if (score == 0 or score is None) and (reviews == 0 or reviews is None):
-                                email_key = email_raw.replace('.', '_').replace('@', '_at_')
-                                
-                                if not ref.child(email_key).get():
-                                    data = {
-                                        'app_name': app.get('title'),
-                                        'email': email_raw,
-                                        'rating': 0,
-                                        'reviews': 0,
-                                        'installs': app.get('installs'),
-                                        'country': lang_country,
-                                        'dev': app.get('developer'),
-                                        'timestamp': datetime.now().isoformat()
-                                    }
-                                    ref.child(email_key).set(data)
-                                    session_leads.append(data)
-                                    new_count += 1
-                    except: continue
-                await asyncio.sleep(1) 
-            except: continue
-    
-    if context.user_data.get('stop_signal'):
-        await context.bot.send_message(uid, f"🛑 সার্চ মাঝপথে থামানো হয়েছে।\nসংগৃহীত লিড: {new_count}টি")
+    # ফাইনাল মেসেজ
+    if check_stop(context):
+        await context.bot.send_message(uid, f"🛑 কাজ জোরপূর্বক থামানো হয়েছে!\nনতুন লিড: {new_count}টি।")
     else:
         if session_leads:
             si = io.StringIO()
             cw = csv.writer(si)
-            cw.writerow(['App Name', 'Email', 'Rating', 'Reviews', 'Installs', 'Country', 'Developer', 'Date'])
+            cw.writerow(['App Name', 'Email', 'Installs', 'Country', 'Date'])
             for v in session_leads:
-                cw.writerow([v.get('app_name'), v.get('email'), 0, 0, v.get('installs'), v.get('country'), v.get('dev'), v.get('timestamp')])
-            
+                cw.writerow([v['app_name'], v['email'], v['installs'], v['country'], v['timestamp']])
             output = io.BytesIO(si.getvalue().encode())
-            output.name = f"Leads_{base_kw}_{datetime.now().strftime('%d_%m')}.csv"
-            await context.bot.send_document(chat_id=uid, document=output, caption=f"✅ কাজ শেষ: '{base_kw}'\n🔥 নতুন লিড: {new_count}টি।")
+            output.name = f"Leads_{base_kw}.csv"
+            await context.bot.send_document(chat_id=uid, document=output, caption=f"✅ সম্পূর্ণ হয়েছে: {base_kw}\n🔥 লিড: {new_count}")
         else:
-            await context.bot.send_message(uid, f"❌ '{base_kw}' দিয়ে কোনো নতুন লিড পাওয়া যায়নি।")
+            await context.bot.send_message(uid, f"❌ কোনো লিড পাওয়া যায়নি: {base_kw}")
 
-    if not context.user_data.get('stop_signal') and context.user_data.get('auto_loop'):
-        await asyncio.sleep(5) 
-        await context.bot.send_message(uid, "🔄 পরবর্তী কিওয়ার্ড লোড করা হচ্ছে...")
+    # অটো লুপ হ্যান্ডলিং
+    if not check_stop(context) and context.user_data.get('auto_loop'):
+        await asyncio.sleep(2)
         await execute_auto_search(context, uid)
 
 # --- Handlers ---
 async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not is_owner(u.effective_user.id): return
-    btn = [[InlineKeyboardButton("🤖 অটো কিওয়ার্ড সার্চ (Firebase Loop)", callback_data='auto_s')]]
-    await u.message.reply_text("বট অনলাইন (Groq AI Enabled)! আমি প্রস্তুত।", reply_markup=InlineKeyboardMarkup(btn))
-
-async def stats(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    if not is_owner(u.effective_user.id): return
-    data = db.reference('scraped_emails').get()
-    count = len(data) if data else 0
-    await u.message.reply_text(f"📊 ডাটাবেজে মোট লিড সংখ্যা: {count}")
-
-async def export(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    if not is_owner(u.effective_user.id): return
-    data = db.reference('scraped_emails').get()
-    if not data:
-        await u.message.reply_text("কোনো ডেটা নেই!")
-        return
-
-    si = io.StringIO()
-    cw = csv.writer(si)
-    cw.writerow(['App Name', 'Email', 'Rating', 'Reviews', 'Installs', 'Country', 'Developer', 'Date'])
-    for k, v in data.items():
-        cw.writerow([v.get('app_name'), v.get('email'), 0, 0, v.get('installs'), v.get('country'), v.get('dev'), v.get('timestamp')])
-    
-    output = io.BytesIO(si.getvalue().encode())
-    output.name = f"Global_Database_Export_{datetime.now().strftime('%d_%m')}.csv"
-    await u.message.reply_document(document=output, caption="✅ ডাটাবেজের সব লিড লিস্ট।")
-
-async def clear_db(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    if not is_owner(u.effective_user.id): return
-    db.reference('scraped_emails').delete()
-    await u.message.reply_text("🗑️ সব ডেটা ডিলিট করা হয়েছে।")
+    btn = [[InlineKeyboardButton("🤖 অটো সার্চ শুরু করুন", callback_data='auto_s')]]
+    await u.message.reply_text("বট অনলাইন। Groq AI এবং Fast-Stop সক্রিয়।", reply_markup=InlineKeyboardMarkup(btn))
 
 async def cb(u: Update, c: ContextTypes.DEFAULT_TYPE):
     q = u.callback_query
@@ -272,22 +205,40 @@ async def cb(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if q.data == 'auto_s':
         c.user_data['auto_loop'] = True
         c.user_data['stop_signal'] = False
-        await q.edit_message_text("🔄 অটোমেটিক লুপ মোড চালু হয়েছে। ফায়ারবেস চেক করা হচ্ছে...")
+        await q.edit_message_text("🔄 অটো সার্চ মোড সক্রিয়...")
         await execute_auto_search(c, u.effective_chat.id)
 
     elif q.data == 'stop_loop':
+        # এখানে ফ্ল্যাগটিকে True করা হয় যা scrape_task এর ভেতরের ৩টি লেভেলে চেক হচ্ছে
         c.user_data['stop_signal'] = True 
         c.user_data['auto_loop'] = False
-        await q.edit_message_text("🛑 থামার নির্দেশ পাঠানো হয়েছে... এখনই থেমে যাবে।")
+        await q.edit_message_text("🛑 থামার নির্দেশ প্রসেস হচ্ছে... (খুব দ্রুতই থেমে যাবে)")
+
+async def stats(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(u.effective_user.id): return
+    data = db.reference('scraped_emails').get()
+    await u.message.reply_text(f"📊 মোট লিড: {len(data) if data else 0}")
+
+async def export(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(u.effective_user.id): return
+    data = db.reference('scraped_emails').get()
+    if not data: return
+    si = io.StringIO()
+    cw = csv.writer(si)
+    cw.writerow(['App Name', 'Email', 'Installs', 'Country', 'Date'])
+    for k, v in data.items():
+        cw.writerow([v.get('app_name'), v.get('email'), v.get('installs'), v.get('country'), v.get('timestamp')])
+    output = io.BytesIO(si.getvalue().encode())
+    output.name = "Database_Export.csv"
+    await u.message.reply_document(document=output)
 
 async def msg(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not is_owner(u.effective_user.id): return
     keyword = u.message.text
     c.user_data['auto_loop'] = False 
     c.user_data['stop_signal'] = False
-    c.user_data['from_cloud'] = False
     asyncio.create_task(scrape_task(keyword, c, u.effective_user.id))
-    await u.message.reply_text(f"🔍 ম্যানুয়াল ইনপুট '{keyword}' গ্রহণ করা হয়েছে। সার্চ চলছে...")
+    await u.message.reply_text(f"🔍 সার্চ চলছে: {keyword}")
 
 def main():
     if not TOKEN: return
@@ -295,10 +246,9 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("export", export))
-    app.add_handler(CommandHandler("clear", clear_db))
     app.add_handler(CallbackQueryHandler(cb))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, msg))
-
+    
     if RENDER_URL:
         app.run_webhook(listen="0.0.0.0", port=PORT, url_path=TOKEN[-10:], 
                         webhook_url=f"{RENDER_URL}/{TOKEN[-10:]}")
