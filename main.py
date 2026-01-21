@@ -24,9 +24,14 @@ TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 OWNER_ID = os.environ.get('BOT_OWNER_ID')
 FB_JSON = os.environ.get('FIREBASE_CREDENTIALS_JSON')
 FB_URL = os.environ.get('FIREBASE_DATABASE_URL')
-GEMINI_KEY = os.environ.get('GEMINI_API_KEY')
 RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL')
 PORT = int(os.environ.get('PORT', '8080'))
+
+# --- Gemini Keys Setup (Multiple Key Support) ---
+# আপনার দেওয়া লজিক অনুযায়ী: একাধিক কি কমা দিয়ে আলাদা করা যাবে
+KEY_ENV = os.environ.get('GEMINI_API_KEY', '')
+GEMINI_KEYS = [k.strip() for k in KEY_ENV.split(',') if k.strip()]
+CURRENT_KEY_INDEX = 0
 
 FIRESTORE_APP_ID = 'keyword-bot-pro'
 
@@ -46,63 +51,66 @@ except Exception as e:
 def is_owner(uid):
     return str(uid) == str(OWNER_ID)
 
-# --- AI Deep Keyword Expansion (Updated: Uses Standard 'gemini-pro' Model) ---
-async def get_expanded_keywords(base_kw):
-    if not GEMINI_KEY: return [base_kw]
-    
-    # পরিবর্তন: 'gemini-pro' ব্যবহার করা হয়েছে যা সব অ্যাকাউন্টে কাজ করে (No 404 Error)
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={GEMINI_KEY}"
-    
-    headers = {'Content-Type': 'application/json'}
-    
-    prompt_text = f"Generate 100 unique, broad, and popular search phrases for Google Play Store to find new and unrated apps related to '{base_kw}'. Focus on terms that return maximum results. Provide only comma-separated values."
-    
-    payload = {
-        "contents": [{
-            "parts": [{"text": prompt_text}]
-        }]
-    }
+# --- AI Helper Functions (Optimized: Your Provided Logic) ---
+def get_next_api_key():
+    global CURRENT_KEY_INDEX
+    if not GEMINI_KEYS: return None
+    key = GEMINI_KEYS[CURRENT_KEY_INDEX % len(GEMINI_KEYS)]
+    CURRENT_KEY_INDEX += 1
+    return key
 
-    # Retry Logic with Error Handling
-    max_retries = 3
-    for attempt in range(max_retries):
+async def get_expanded_keywords(base_kw):
+    """
+    আপনার দেওয়া লজিক অনুযায়ী কিওয়ার্ড জেনারেট করবে।
+    এটি একাধিক কি রোটেট করে এবং gemini-2.0-flash ব্যবহার করে।
+    """
+    if not GEMINI_KEYS:
+        return [base_kw]
+
+    # সব কটি কি (Key) একবার করে ট্রাই করবে যদি এরর আসে
+    for _ in range(len(GEMINI_KEYS)):
+        api_key = get_next_api_key()
+        if not api_key: break
+
+        # আপনার দেওয়া মডেল
+        model_version = "gemini-2.0-flash" 
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_version}:generateContent?key={api_key}"
+        
+        prompt = f"""
+        Generate 100 unique, broad, and popular search phrases for Google Play Store to find new and unrated apps related to '{base_kw}'. 
+        Focus on terms that return maximum results. 
+        Provide only comma-separated values (no bullets, no numbering).
+        """
+        
+        payload = {"contents": [{"parts": [{"text": prompt}]}]}
+        headers = {'Content-Type': 'application/json'}
+
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(url, headers=headers, json=payload) as response:
                     if response.status == 200:
-                        result = await response.json()
+                        res_json = await response.json()
                         try:
-                            # Gemini Pro রেসপন্স পার্সিং
-                            if 'candidates' in result and result['candidates']:
-                                text_data = result['candidates'][0]['content']['parts'][0]['text']
-                                kws = [k.strip() for k in text_data.split(',') if k.strip()]
-                                final_list = list(set([base_kw] + kws))[:100]
-                                return final_list
-                            else:
-                                logger.error(f"Gemini Empty Response: {result}")
-                                return [base_kw]
+                            text_data = res_json['candidates'][0]['content']['parts'][0]['text']
+                            kws = [k.strip() for k in text_data.split(',') if k.strip()]
+                            # সফল হলে লিস্ট রিটার্ন করবে
+                            return list(set([base_kw] + kws))[:100]
                         except Exception as e:
                             logger.error(f"Gemini Parse Error: {e}")
-                            return [base_kw]
-                    
                     elif response.status == 429:
-                        wait_time = 20 * (attempt + 1)
-                        logger.warning(f"⚠️ Gemini Rate Limit (429). Waiting {wait_time}s before retry...")
-                        await asyncio.sleep(wait_time)
-                    
+                        logger.warning(f"⚠️ Key Rate Limited (429). Switching key...")
+                        continue # পরের লুপে গিয়ে পরের কি ট্রাই করবে
                     else:
-                        error_text = await response.text()
-                        logger.error(f"Gemini API Error {response.status}: {error_text}")
-                        # 404 বা অন্য এরর হলে সাথে সাথে রিটার্ন করবে, রি-ট্রাই করবে না
-                        if response.status == 404:
-                            logger.error("❌ Model Not Found (404). Check API Key or Region.")
-                            return [base_kw]
+                        logger.error(f"Gemini Error {response.status}")
                         
         except Exception as e:
-            logger.error(f"Gemini Connection Error: {e}")
-            return [base_kw]
-            
-    logger.error("❌ Gemini Failed after retries. Using base keyword.")
+            logger.error(f"❌ AI Connection Error: {e}")
+        
+        # খুব দ্রুত রিকোয়েস্ট না পাঠানোর জন্য সামান্য বিরতি
+        await asyncio.sleep(1)
+
+    # সব কি ফেইল করলে বেস কিওয়ার্ড রিটার্ন করবে
+    logger.error("❌ All API Keys failed. Using base keyword.")
     return [base_kw]
 
 # --- Helper: Fetch Keyword & Trigger Search ---
@@ -122,7 +130,6 @@ async def execute_auto_search(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
             data = doc.to_dict()
             keyword = data.get('word')
             
-            # ডিলিট করা হচ্ছে
             doc.reference.delete()
             
             context.user_data['from_cloud'] = True
@@ -138,12 +145,14 @@ async def execute_auto_search(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
 
 # --- Global Scraper Engine ---
 async def scrape_task(base_kw, context, uid):
+    # নতুন AI ফাংশন কল করা হচ্ছে
     keywords = await get_expanded_keywords(base_kw)
+    
     countries = ['us', 'gb', 'in', 'ca', 'br', 'au', 'de', 'id', 'ph', 'pk', 'za', 'mx', 'tr', 'sa', 'ae', 'ru', 'fr', 'it', 'es', 'nl'] 
     
     stop_btn = [[InlineKeyboardButton("🛑 Stop Auto Search", callback_data='stop_loop')]] if context.user_data.get('auto_loop') else []
     
-    msg_text = f"🌍 **মেগা সার্চ শুরু!** \n🔍 নিস: {base_kw}\n🎯 ১০০টি কিওয়ার্ড এবং ২০টি দেশে তল্লাশি চলছে...\n(Keyword taken from Cloud)" if context.user_data.get('from_cloud') else f"🌍 **মেগা সার্চ শুরু!** \n🔍 নিস: {base_kw}\n🎯 ১০০টি কিওয়ার্ড এবং ২০টি দেশে তল্লাশি চলছে..."
+    msg_text = f"🌍 **মেগা সার্চ শুরু!** \n🔍 নিস: {base_kw}\n🎯 কিওয়ার্ড জেনারেটেড: {len(keywords)}টি\n🚀 ২০টি দেশে তল্লাশি চলছে...\n(Keyword taken from Cloud)" if context.user_data.get('from_cloud') else f"🌍 **মেগা সার্চ শুরু!** \n🔍 নিস: {base_kw}\n🎯 কিওয়ার্ড জেনারেটেড: {len(keywords)}টি\n🚀 ২০টি দেশে তল্লাশি চলছে..."
     
     await context.bot.send_message(uid, msg_text, reply_markup=InlineKeyboardMarkup(stop_btn) if stop_btn else None)
     
