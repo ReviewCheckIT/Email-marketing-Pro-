@@ -51,7 +51,7 @@ async def get_expanded_keywords(base_kw):
     if not GEMINI_KEY: return [base_kw]
     
     # পরিবর্তন: 1.5-flash মডেল ব্যবহার করা হচ্ছে (এটি বেশি স্টেবল এবং 429 এরর কম দেয়)
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
     
     headers = {'Content-Type': 'application/json'}
     
