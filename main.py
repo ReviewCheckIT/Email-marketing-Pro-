@@ -44,12 +44,14 @@ except Exception as e:
     sys.exit(1)
 
 def is_owner(uid):
-# --- AI Deep Keyword Expansion (Updated: Using Stable Model 1.5-Flash) ---
+    return str(uid) == str(OWNER_ID)
+
+# --- AI Deep Keyword Expansion (Updated: Uses Stable 1.5-Flash Model) ---
 async def get_expanded_keywords(base_kw):
     if not GEMINI_KEY: return [base_kw]
     
-    # পরিবর্তন: মডেল 2.0 এর বদলে 1.5-flash ব্যবহার করা হচ্ছে (এটি বেশি স্টেবল)
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
+    # পরিবর্তন: 1.5-flash মডেল ব্যবহার করা হচ্ছে (এটি বেশি স্টেবল এবং 429 এরর কম দেয়)
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
     
     headers = {'Content-Type': 'application/json'}
     
@@ -61,6 +63,7 @@ async def get_expanded_keywords(base_kw):
         }]
     }
 
+    # Retry Logic: 20s -> 40s -> 60s
     max_retries = 3
     for attempt in range(max_retries):
         try:
@@ -74,18 +77,18 @@ async def get_expanded_keywords(base_kw):
                             final_list = list(set([base_kw] + kws))[:100]
                             return final_list
                         except (KeyError, IndexError):
-                            logger.error(f"Gemini Parse Error: {result}") # রেসপন্স স্ট্রাকচার লগ করা হলো
+                            logger.error(f"Gemini Parse Error: {result}")
                             return [base_kw]
                     
                     elif response.status == 429:
-                        wait_time = 20 * (attempt + 1) # সময় বাড়িয়ে ২০ সেকেন্ড থেকে শুরু
-                        logger.warning(f"⚠️ Gemini Rate Limit (429). Waiting {wait_time}s...")
+                        wait_time = 20 * (attempt + 1)
+                        logger.warning(f"⚠️ Gemini Rate Limit (429). Waiting {wait_time}s before retry...")
                         await asyncio.sleep(wait_time)
                     
                     else:
-                        # আসল এরর মেসেজ দেখার জন্য
                         error_text = await response.text()
                         logger.error(f"Gemini API Error {response.status}: {error_text}")
+                        # 429 বাদে অন্য এরর হলে রি-ট্রাই করে লাভ নেই
                         return [base_kw]
                         
         except Exception as e:
@@ -95,8 +98,8 @@ async def get_expanded_keywords(base_kw):
     logger.error("❌ Gemini Failed after retries. Using base keyword.")
     return [base_kw]
 
-# --- Helper: Fetch Keyword & Trigger Search (Fixed Update Object Error) ---
-# এখন আমরা পুরো update অবজেক্ট না পাঠিয়ে শুধু chat_id পাঠাচ্ছি
+# --- Helper: Fetch Keyword & Trigger Search ---
+# Chat ID সরাসরি গ্রহণ করে
 async def execute_auto_search(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     # লুপ চালু আছে কিনা চেক করা
     if not context.user_data.get('auto_loop'):
@@ -118,7 +121,7 @@ async def execute_auto_search(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
             doc.reference.delete()
             
             context.user_data['from_cloud'] = True
-            # সার্চ টাস্ক কল করা
+            # সার্চ টাস্ক কল করা (সরাসরি চ্যাট আইডি পাস করা হচ্ছে)
             await scrape_task(keyword, context, chat_id)
         else:
             context.user_data['auto_loop'] = False # লুপ বন্ধ
@@ -207,11 +210,10 @@ async def scrape_task(base_kw, context, uid):
     else:
         await context.bot.send_message(uid, f"❌ '{base_kw}' দিয়ে কোনো নতুন জিরো-রেটিং অ্যাপ পাওয়া যায়নি।")
 
-    # --- অটোমেটিক লুপ লজিক (Fixed Recursive Call) ---
+    # --- অটোমেটিক লুপ লজিক ---
     if context.user_data.get('auto_loop') and should_continue:
         await asyncio.sleep(5) # ৫ সেকেন্ড বিরতি
         await context.bot.send_message(uid, "🔄 পরবর্তী কিওয়ার্ড লোড করা হচ্ছে...")
-        # এখানে সরাসরি chat_id (uid) পাস করা হচ্ছে, Update অবজেক্ট নয়
         await execute_auto_search(context, uid)
 
 # --- Handlers ---
@@ -257,7 +259,7 @@ async def cb(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if q.data == 'auto_s':
         c.user_data['auto_loop'] = True
         await q.edit_message_text("🔄 অটোমেটিক লুপ মোড চালু হয়েছে। ফায়ারবেস চেক করা হচ্ছে...")
-        # এখানে সরাসরি chat_id পাঠানো হচ্ছে
+        # এখানে সরাসরি chat_id পাস করা হচ্ছে
         await execute_auto_search(c, u.effective_chat.id)
 
     elif q.data == 'stop_loop':
