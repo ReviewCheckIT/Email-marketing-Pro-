@@ -6,13 +6,12 @@ import asyncio
 import csv
 import io
 import sys
-import aiohttp # নতুন: API কল করার জন্য
+import aiohttp
 from datetime import datetime
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
 from google_play_scraper import search as play_search, app as app_details
-# from google.genai import Client # পুরনো লাইব্রেরি বাদ দেওয়া হয়েছে
 import firebase_admin
 from firebase_admin import credentials, db, firestore
 
@@ -47,16 +46,12 @@ except Exception as e:
 def is_owner(uid):
     return str(uid) == str(OWNER_ID)
 
-# --- AI Deep Keyword Expansion (Updated: REST API via URL) ---
+# --- AI Deep Keyword Expansion (Fixed 429 Error with Retry) ---
 async def get_expanded_keywords(base_kw):
     if not GEMINI_KEY: return [base_kw]
     
-    # আপনার দেওয়া URL এবং ফরম্যাট অনুযায়ী
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}"
-    
-    headers = {
-        'Content-Type': 'application/json'
-    }
+    headers = {'Content-Type': 'application/json'}
     
     prompt_text = f"Generate 100 unique, broad, and popular search phrases for Google Play Store to find new and unrated apps related to '{base_kw}'. Focus on terms that return maximum results. Provide only comma-separated values."
     
@@ -66,32 +61,41 @@ async def get_expanded_keywords(base_kw):
         }]
     }
 
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, json=payload) as response:
-                if response.status == 200:
-                    result = await response.json()
-                    # JSON রেসপন্স থেকে টেক্সট বের করা
-                    try:
-                        text_data = result['candidates'][0]['content']['parts'][0]['text']
-                        kws = [k.strip() for k in text_data.split(',') if k.strip()]
-                        final_list = list(set([base_kw] + kws))[:100]
-                        return final_list
-                    except (KeyError, IndexError):
-                        logger.error("Gemini Response Parse Error")
+    # Retry logic added specifically for 429 errors
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, headers=headers, json=payload) as response:
+                    if response.status == 200:
+                        result = await response.json()
+                        try:
+                            text_data = result['candidates'][0]['content']['parts'][0]['text']
+                            kws = [k.strip() for k in text_data.split(',') if k.strip()]
+                            final_list = list(set([base_kw] + kws))[:100]
+                            return final_list
+                        except (KeyError, IndexError):
+                            return [base_kw]
+                    elif response.status == 429:
+                        wait_time = 10 * (attempt + 1)
+                        logger.warning(f"⚠️ Gemini Rate Limit (429). Waiting {wait_time}s before retry...")
+                        await asyncio.sleep(wait_time)
+                    else:
+                        logger.error(f"Gemini API Error: {response.status}")
                         return [base_kw]
-                else:
-                    logger.error(f"Gemini API Error: {response.status}")
-                    return [base_kw]
-    except Exception as e:
-        logger.error(f"Gemini Connection Error: {e}")
-        return [base_kw]
+        except Exception as e:
+            logger.error(f"Gemini Connection Error: {e}")
+            return [base_kw]
+            
+    logger.error("❌ Gemini Failed after retries. Using base keyword.")
+    return [base_kw]
 
-# --- Helper: Fetch Keyword from Firestore & Trigger Search ---
-async def execute_auto_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# --- Helper: Fetch Keyword & Trigger Search (Fixed Update Object Error) ---
+# এখন আমরা পুরো update অবজেক্ট না পাঠিয়ে শুধু chat_id পাঠাচ্ছি
+async def execute_auto_search(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     # লুপ চালু আছে কিনা চেক করা
     if not context.user_data.get('auto_loop'):
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="🛑 অটো সার্চ বন্ধ করা হয়েছে।")
+        await context.bot.send_message(chat_id=chat_id, text="🛑 অটো সার্চ বন্ধ করা হয়েছে।")
         return
 
     try:
@@ -110,22 +114,21 @@ async def execute_auto_search(update: Update, context: ContextTypes.DEFAULT_TYPE
             
             context.user_data['from_cloud'] = True
             # সার্চ টাস্ক কল করা
-            await scrape_task(keyword, context, update.effective_chat.id)
+            await scrape_task(keyword, context, chat_id)
         else:
             context.user_data['auto_loop'] = False # লুপ বন্ধ
-            await context.bot.send_message(chat_id=update.effective_chat.id, text="⚠️ ফায়ারবেসে আর কোনো কিওয়ার্ড নেই। অটো সার্চ সমাপ্ত।")
+            await context.bot.send_message(chat_id=chat_id, text="⚠️ ফায়ারবেসে আর কোনো কিওয়ার্ড নেই। অটো সার্চ সমাপ্ত।")
             
     except Exception as e:
         logger.error(f"Firestore Fetch Error: {e}")
         context.user_data['auto_loop'] = False
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"⚠️ এরর: {e}")
+        await context.bot.send_message(chat_id=chat_id, text=f"⚠️ এরর: {e}")
 
-# --- Global Scraper Engine (Updated Loop Logic) ---
+# --- Global Scraper Engine ---
 async def scrape_task(base_kw, context, uid):
     keywords = await get_expanded_keywords(base_kw)
     countries = ['us', 'gb', 'in', 'ca', 'br', 'au', 'de', 'id', 'ph', 'pk', 'za', 'mx', 'tr', 'sa', 'ae', 'ru', 'fr', 'it', 'es', 'nl'] 
     
-    # স্টপ বাটন যোগ করা হয়েছে
     stop_btn = [[InlineKeyboardButton("🛑 Stop Auto Search", callback_data='stop_loop')]] if context.user_data.get('auto_loop') else []
     
     msg_text = f"🌍 **মেগা সার্চ শুরু!** \n🔍 নিস: {base_kw}\n🎯 ১০০টি কিওয়ার্ড এবং ২০টি দেশে তল্লাশি চলছে...\n(Keyword taken from Cloud)" if context.user_data.get('from_cloud') else f"🌍 **মেগা সার্চ শুরু!** \n🔍 নিস: {base_kw}\n🎯 ১০০টি কিওয়ার্ড এবং ২০টি দেশে তল্লাশি চলছে..."
@@ -137,11 +140,9 @@ async def scrape_task(base_kw, context, uid):
     ref = db.reference('scraped_emails')
     processed_apps = set()
 
-    # লুপের মধ্যে স্টপ চেক করার জন্য ফ্ল্যাগ চেক
     should_continue = True
 
     for kw in keywords:
-        # ইউজার যদি মাঝপথে স্টপ বাটন চাপে
         if context.user_data.get('auto_loop') is False and context.user_data.get('from_cloud'):
             should_continue = False
             break
@@ -188,7 +189,6 @@ async def scrape_task(base_kw, context, uid):
                 await asyncio.sleep(1.5) 
             except: continue
     
-    # রেজাল্ট পাঠানো
     if session_leads:
         si = io.StringIO()
         cw = csv.writer(si)
@@ -202,16 +202,12 @@ async def scrape_task(base_kw, context, uid):
     else:
         await context.bot.send_message(uid, f"❌ '{base_kw}' দিয়ে কোনো নতুন জিরো-রেটিং অ্যাপ পাওয়া যায়নি।")
 
-    # --- অটোমেটিক লুপ লজিক ---
-    # যদি ক্লাউড মোড অন থাকে এবং ইউজার স্টপ না করে থাকে, তবে পরের কিওয়ার্ড সার্চ হবে
+    # --- অটোমেটিক লুপ লজিক (Fixed Recursive Call) ---
     if context.user_data.get('auto_loop') and should_continue:
-        await asyncio.sleep(3) # ৩ সেকেন্ড বিরতি
+        await asyncio.sleep(5) # ৫ সেকেন্ড বিরতি
         await context.bot.send_message(uid, "🔄 পরবর্তী কিওয়ার্ড লোড করা হচ্ছে...")
-        # এখানে আপডেট অবজেক্ট ফেক করা হচ্ছে যাতে আগের ফাংশন রিইউজ করা যায়
-        dummy_update = Update(update_id=0, message=None, effective_chat=context.bot.get_chat(uid))
-        dummy_update.effective_chat.id = uid # আইডি সেট করা
-        
-        await execute_auto_search(dummy_update, context)
+        # এখানে সরাসরি chat_id (uid) পাস করা হচ্ছে, Update অবজেক্ট নয়
+        await execute_auto_search(context, uid)
 
 # --- Handlers ---
 async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
@@ -247,19 +243,20 @@ async def clear_db(u: Update, c: ContextTypes.DEFAULT_TYPE):
     db.reference('scraped_emails').delete()
     await u.message.reply_text("🗑️ সব ডেটা ডিলিট করা হয়েছে।")
 
-# --- Updated Callback Handler ---
+# --- Callback Handler ---
 async def cb(u: Update, c: ContextTypes.DEFAULT_TYPE):
     q = u.callback_query
     if not is_owner(q.from_user.id): return
     await q.answer()
     
     if q.data == 'auto_s':
-        c.user_data['auto_loop'] = True # লুপ চালু করা হলো
+        c.user_data['auto_loop'] = True
         await q.edit_message_text("🔄 অটোমেটিক লুপ মোড চালু হয়েছে। ফায়ারবেস চেক করা হচ্ছে...")
-        await execute_auto_search(u, c)
+        # এখানে সরাসরি chat_id পাঠানো হচ্ছে
+        await execute_auto_search(c, u.effective_chat.id)
 
     elif q.data == 'stop_loop':
-        c.user_data['auto_loop'] = False # লুপ বন্ধ করা হলো
+        c.user_data['auto_loop'] = False
         await q.edit_message_text("🛑 থামার নির্দেশ গ্রহণ করা হয়েছে। বর্তমান সার্চ শেষ হলে আর নতুন সার্চ হবে না।")
 
 async def msg(u: Update, c: ContextTypes.DEFAULT_TYPE):
@@ -268,7 +265,6 @@ async def msg(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if c.user_data.get('state') == 'kw':
         c.user_data['state'] = None
         keyword = u.message.text
-        # ম্যানুয়াল সার্চে লুপ ফলস থাকবে
         c.user_data['auto_loop'] = False 
         c.user_data['from_cloud'] = False
         asyncio.create_task(scrape_task(keyword, c, u.effective_user.id))
