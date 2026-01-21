@@ -27,9 +27,8 @@ FB_URL = os.environ.get('FIREBASE_DATABASE_URL')
 RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL')
 PORT = int(os.environ.get('PORT', '8080'))
 
-# --- Gemini Keys Setup (Robust Parsing) ---
+# --- Gemini Keys Setup ---
 KEY_ENV = os.environ.get('GEMINI_API_KEY', '')
-# কমা দিয়ে আলাদা করা কীগুলো ক্লিন করে লিস্টে নেওয়া হচ্ছে
 GEMINI_KEYS = [k.strip() for k in KEY_ENV.split(',') if k.strip()]
 CURRENT_KEY_INDEX = 0
 
@@ -51,7 +50,7 @@ except Exception as e:
 def is_owner(uid):
     return str(uid) == str(OWNER_ID)
 
-# --- AI Helper Functions (Fixed & Optimized) ---
+# --- AI Helper Functions (Smart Model Fallback) ---
 def get_next_api_key():
     global CURRENT_KEY_INDEX
     if not GEMINI_KEYS: return None
@@ -61,71 +60,63 @@ def get_next_api_key():
 
 async def get_expanded_keywords(base_kw):
     """
-    ১০০% কাজ করার জন্য 'gemini-1.5-flash' ব্যবহার করা হয়েছে।
-    এটি লুপ করে সব API Key চেক করবে যতক্ষণ না সফল হয়।
+    AI ফিক্স: এটি এখন একাধিক মডেল ট্রাই করবে।
+    প্রথমে 2.0-flash -> ব্যর্থ হলে 1.5-flash -> ব্যর্থ হলে 1.5-pro
     """
     if not GEMINI_KEYS:
-        logger.warning("⚠️ No Gemini Keys found in Env!")
+        logger.warning("⚠️ No Gemini Keys found!")
         return [base_kw]
 
-    # প্রতিটি কি (Key) একবার করে ট্রাই করবে
+    # মডেলের তালিকা (অগ্রাধিকার অনুযায়ী)
+    models_to_try = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
+    
+    # কী লুপ
     for i in range(len(GEMINI_KEYS)):
         api_key = get_next_api_key()
         if not api_key: break
 
-        # 1.5-flash সবচেয়ে স্টেবল এবং ফাস্ট
-        model_version = "gemini-1.5-flash"
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_version}:generateContent?key={api_key}"
-        
-        prompt = f"""
-        Generate 100 unique, broad, and popular search phrases for Google Play Store to find new and unrated apps related to '{base_kw}'. 
-        Focus on terms that return maximum results. 
-        Provide only comma-separated values (no bullets, no numbering).
-        """
-        
-        payload = {"contents": [{"parts": [{"text": prompt}]}]}
-        headers = {'Content-Type': 'application/json'}
+        # মডেল লুপ (প্রতিটি কী দিয়ে সব মডেল ট্রাই করবে)
+        for model in models_to_try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+            
+            prompt = f"Generate 100 unique, broad, and popular search phrases for Google Play Store to find new and unrated apps related to '{base_kw}'. Focus on terms that return maximum results. Provide only comma-separated values."
+            
+            payload = {"contents": [{"parts": [{"text": prompt}]}]}
+            headers = {'Content-Type': 'application/json'}
 
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=headers, json=payload) as response:
-                    if response.status == 200:
-                        res_json = await response.json()
-                        try:
-                            text_data = res_json['candidates'][0]['content']['parts'][0]['text']
-                            kws = [k.strip() for k in text_data.split(',') if k.strip()]
-                            final_list = list(set([base_kw] + kws))[:100]
-                            # সফল হলে লুপ ব্রেক করে রেজাল্ট ফেরত দেবে
-                            return final_list
-                        except Exception as e:
-                            logger.error(f"⚠️ Key {i+1} Parse Error: {e}")
-                    
-                    elif response.status == 429:
-                        logger.warning(f"⚠️ Key {i+1} Rate Limited (429). Switching to next key...")
-                        # পরের কি ট্রাই করার জন্য লুপ কন্টিনিউ করবে
-                        continue 
-                    
-                    elif response.status == 404:
-                        logger.error(f"❌ Key {i+1} Model Not Found (404).")
-                        continue
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(url, headers=headers, json=payload) as response:
+                        if response.status == 200:
+                            res_json = await response.json()
+                            try:
+                                text_data = res_json['candidates'][0]['content']['parts'][0]['text']
+                                kws = [k.strip() for k in text_data.split(',') if k.strip()]
+                                final_list = list(set([base_kw] + kws))[:100]
+                                logger.info(f"✅ Success with Model: {model}")
+                                return final_list
+                            except Exception:
+                                continue # পার্স এরর হলে পরের মডেল দেখবে
+                        elif response.status == 429:
+                            logger.warning(f"⚠️ Key Rate Limited on {model}. Switching key...")
+                            break # এই কী দিয়ে আর লাভ নেই, লুপ ব্রেক করে পরের কী তে যাবে
+                        else:
+                            # 404 বা অন্য এরর হলে পরের মডেল দেখবে
+                            continue 
+            except Exception as e:
+                logger.error(f"Connection Error on {model}: {e}")
+                continue
 
-                    else:
-                        err_text = await response.text()
-                        logger.error(f"❌ Key {i+1} Error {response.status}: {err_text}")
-                        continue
-                        
-        except Exception as e:
-            logger.error(f"❌ Key {i+1} Connection Error: {e}")
-            continue
-
-    # যদি সব কি ফেইল করে
-    logger.error("❌ All API Keys failed. Using base keyword.")
+    logger.error("❌ All AI attempts failed. Using base keyword.")
     return [base_kw]
 
 # --- Helper: Fetch Keyword & Trigger Search ---
 async def execute_auto_search(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
-    if not context.user_data.get('auto_loop'):
-        await context.bot.send_message(chat_id=chat_id, text="🛑 অটো সার্চ বন্ধ করা হয়েছে।")
+    # শুরুতেই চেক
+    if context.user_data.get('stop_signal'):
+        context.user_data['auto_loop'] = False
+        context.user_data['stop_signal'] = False
+        await context.bot.send_message(chat_id=chat_id, text="🛑 অটো সার্চ পুরোপুরি থামানো হয়েছে।")
         return
 
     try:
@@ -138,7 +129,6 @@ async def execute_auto_search(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
             doc = docs[0]
             data = doc.to_dict()
             keyword = data.get('word')
-            
             doc.reference.delete()
             
             context.user_data['from_cloud'] = True
@@ -152,36 +142,43 @@ async def execute_auto_search(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
         context.user_data['auto_loop'] = False
         await context.bot.send_message(chat_id=chat_id, text=f"⚠️ এরর: {e}")
 
-# --- Global Scraper Engine ---
+# --- Global Scraper Engine (Optimized for Immediate Stop) ---
 async def scrape_task(base_kw, context, uid):
-    keywords = await get_expanded_keywords(base_kw)
+    # স্টপ সিগন্যাল রিসেট
+    context.user_data['stop_signal'] = False
     
+    keywords = await get_expanded_keywords(base_kw)
     countries = ['us', 'gb', 'in', 'ca', 'br', 'au', 'de', 'id', 'ph', 'pk', 'za', 'mx', 'tr', 'sa', 'ae', 'ru', 'fr', 'it', 'es', 'nl'] 
     
-    stop_btn = [[InlineKeyboardButton("🛑 Stop Auto Search", callback_data='stop_loop')]] if context.user_data.get('auto_loop') else []
+    # বাটন সেটআপ
+    stop_btn = [[InlineKeyboardButton("🛑 Stop Auto Search", callback_data='stop_loop')]]
     
-    msg_text = f"🌍 **মেগা সার্চ শুরু!** \n🔍 নিস: {base_kw}\n🎯 কিওয়ার্ড জেনারেটেড: {len(keywords)}টি\n🚀 ২০টি দেশে তল্লাশি চলছে...\n(Keyword taken from Cloud)" if context.user_data.get('from_cloud') else f"🌍 **মেগা সার্চ শুরু!** \n🔍 নিস: {base_kw}\n🎯 কিওয়ার্ড জেনারেটেড: {len(keywords)}টি\n🚀 ২০টি দেশে তল্লাশি চলছে..."
+    msg_text = f"🌍 **মেগা সার্চ শুরু!** \n🔍 নিস: {base_kw}\n🎯 কিওয়ার্ড: {len(keywords)}টি\n(Cloud Keyword)" if context.user_data.get('from_cloud') else f"🌍 **মেগা সার্চ শুরু!** \n🔍 নিস: {base_kw}\n🎯 কিওয়ার্ড: {len(keywords)}টি"
     
-    await context.bot.send_message(uid, msg_text, reply_markup=InlineKeyboardMarkup(stop_btn) if stop_btn else None)
+    status_msg = await context.bot.send_message(uid, msg_text, reply_markup=InlineKeyboardMarkup(stop_btn))
     
     new_count = 0
     session_leads = []
     ref = db.reference('scraped_emails')
     processed_apps = set()
 
-    should_continue = True
-
+    # মেইন লুপ
     for kw in keywords:
-        if context.user_data.get('auto_loop') is False and context.user_data.get('from_cloud'):
-            should_continue = False
-            break
+        # 1. কিওয়ার্ড লুপের শুরুতে স্টপ চেক
+        if context.user_data.get('stop_signal'): break
 
         for lang_country in countries:
+            # 2. কান্ট্রি লুপের শুরুতে স্টপ চেক (আরও ফাস্ট রেসপন্সের জন্য)
+            if context.user_data.get('stop_signal'): break
+
             try:
                 results = play_search(kw, n_hits=250, lang='en', country=lang_country) 
                 if not results: continue
 
                 for r in results:
+                    # 3. প্রতিটি অ্যাপ প্রসেসিংয়ের আগে স্টপ চেক (তাৎক্ষণিক থামার জন্য)
+                    if context.user_data.get('stop_signal'): break
+
                     app_id = r['appId']
                     if app_id in processed_apps: continue
                     processed_apps.add(app_id)
@@ -212,27 +209,35 @@ async def scrape_task(base_kw, context, uid):
                                     new_count += 1
                     except: continue
                 
+                # প্রগ্রেস আপডেট
                 if new_count > 0 and new_count % 30 == 0:
-                    logger.info(f"Progress: Found {new_count} leads...")
+                    # লগের বদলে টেলিগ্রামে এডিট করলে ইউজার বুঝতে পারবে কাজ চলছে
+                    pass 
                 
-                await asyncio.sleep(1.5) 
+                await asyncio.sleep(1) 
             except: continue
     
-    if session_leads:
-        si = io.StringIO()
-        cw = csv.writer(si)
-        cw.writerow(['App Name', 'Email', 'Rating', 'Reviews', 'Installs', 'Country', 'Developer', 'Date'])
-        for v in session_leads:
-            cw.writerow([v.get('app_name'), v.get('email'), 0, 0, v.get('installs'), v.get('country'), v.get('dev'), v.get('timestamp')])
-        
-        output = io.BytesIO(si.getvalue().encode())
-        output.name = f"Leads_{base_kw}_{datetime.now().strftime('%d_%m')}.csv"
-        await context.bot.send_document(chat_id=uid, document=output, caption=f"✅ কাজ শেষ: '{base_kw}'\n🔥 নতুন লিড: {new_count}টি।")
+    # লুপ শেষ বা ব্রেক হওয়ার পর
+    if context.user_data.get('stop_signal'):
+        await context.bot.send_message(uid, f"🛑 সার্চ মাঝপথে থামানো হয়েছে।\nসংগৃহীত লিড: {new_count}টি")
     else:
-        await context.bot.send_message(uid, f"❌ '{base_kw}' দিয়ে কোনো নতুন জিরো-রেটিং অ্যাপ পাওয়া যায়নি।")
+        # স্বাভাবিক সমাপ্তি
+        if session_leads:
+            si = io.StringIO()
+            cw = csv.writer(si)
+            cw.writerow(['App Name', 'Email', 'Rating', 'Reviews', 'Installs', 'Country', 'Developer', 'Date'])
+            for v in session_leads:
+                cw.writerow([v.get('app_name'), v.get('email'), 0, 0, v.get('installs'), v.get('country'), v.get('dev'), v.get('timestamp')])
+            
+            output = io.BytesIO(si.getvalue().encode())
+            output.name = f"Leads_{base_kw}_{datetime.now().strftime('%d_%m')}.csv"
+            await context.bot.send_document(chat_id=uid, document=output, caption=f"✅ কাজ শেষ: '{base_kw}'\n🔥 নতুন লিড: {new_count}টি।")
+        else:
+            await context.bot.send_message(uid, f"❌ '{base_kw}' দিয়ে কোনো নতুন লিড পাওয়া যায়নি।")
 
     # --- অটোমেটিক লুপ লজিক ---
-    if context.user_data.get('auto_loop') and should_continue:
+    # যদি স্টপ সিগন্যাল না থাকে এবং অটো লুপ অন থাকে, তবেই কন্টিনিউ করবে
+    if not context.user_data.get('stop_signal') and context.user_data.get('auto_loop'):
         await asyncio.sleep(5) 
         await context.bot.send_message(uid, "🔄 পরবর্তী কিওয়ার্ড লোড করা হচ্ছে...")
         await execute_auto_search(context, uid)
@@ -241,7 +246,7 @@ async def scrape_task(base_kw, context, uid):
 async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not is_owner(u.effective_user.id): return
     btn = [[InlineKeyboardButton("🤖 অটো কিওয়ার্ড সার্চ (Firebase Loop)", callback_data='auto_s')]]
-    await u.message.reply_text("বট অনলাইন! আমি প্রস্তুত।\nনিচের বাটনে ক্লিক করলে আমি ফায়ারবেস থেকে একের পর এক কিওয়ার্ড নিয়ে কাজ শুরু করব।", reply_markup=InlineKeyboardMarkup(btn))
+    await u.message.reply_text("বট অনলাইন! আমি প্রস্তুত।", reply_markup=InlineKeyboardMarkup(btn))
 
 async def stats(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not is_owner(u.effective_user.id): return
@@ -271,7 +276,7 @@ async def clear_db(u: Update, c: ContextTypes.DEFAULT_TYPE):
     db.reference('scraped_emails').delete()
     await u.message.reply_text("🗑️ সব ডেটা ডিলিট করা হয়েছে।")
 
-# --- Callback Handler ---
+# --- Callback Handler (Stop Signal Fix) ---
 async def cb(u: Update, c: ContextTypes.DEFAULT_TYPE):
     q = u.callback_query
     if not is_owner(q.from_user.id): return
@@ -279,12 +284,15 @@ async def cb(u: Update, c: ContextTypes.DEFAULT_TYPE):
     
     if q.data == 'auto_s':
         c.user_data['auto_loop'] = True
+        c.user_data['stop_signal'] = False # রিসেট
         await q.edit_message_text("🔄 অটোমেটিক লুপ মোড চালু হয়েছে। ফায়ারবেস চেক করা হচ্ছে...")
         await execute_auto_search(c, u.effective_chat.id)
 
     elif q.data == 'stop_loop':
+        # এখানে ফ্ল্যাগ সেট করা হলো যা লুপের ভেতরে চেক হবে
+        c.user_data['stop_signal'] = True 
         c.user_data['auto_loop'] = False
-        await q.edit_message_text("🛑 থামার নির্দেশ গ্রহণ করা হয়েছে। বর্তমান সার্চ শেষ হলে আর নতুন সার্চ হবে না।")
+        await q.edit_message_text("🛑 থামার নির্দেশ পাঠানো হয়েছে... এখনই থেমে যাবে।")
 
 async def msg(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not is_owner(u.effective_user.id): return
@@ -293,6 +301,7 @@ async def msg(u: Update, c: ContextTypes.DEFAULT_TYPE):
         c.user_data['state'] = None
         keyword = u.message.text
         c.user_data['auto_loop'] = False 
+        c.user_data['stop_signal'] = False
         c.user_data['from_cloud'] = False
         asyncio.create_task(scrape_task(keyword, c, u.effective_user.id))
         await u.message.reply_text(f"🔍 ম্যানুয়াল ইনপুট '{keyword}' গ্রহণ করা হয়েছে। সার্চ চলছে...")
