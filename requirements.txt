@@ -1,0 +1,6 @@
+python-telegram-bot[webhooks]==20.8
+google-play-scraper
+google-genai
+firebase-admin
+httpx
+asyncio
