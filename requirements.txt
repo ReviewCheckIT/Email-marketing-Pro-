@@ -5,3 +5,4 @@ firebase-admin
 httpx
 asyncio
 aiohttp
+python-dotenv==1.0.1
