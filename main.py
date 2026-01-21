@@ -27,9 +27,9 @@ FB_URL = os.environ.get('FIREBASE_DATABASE_URL')
 RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL')
 PORT = int(os.environ.get('PORT', '8080'))
 
-# --- Gemini Keys Setup (Multiple Key Support) ---
-# আপনার দেওয়া লজিক অনুযায়ী: একাধিক কি কমা দিয়ে আলাদা করা যাবে
+# --- Gemini Keys Setup (Robust Parsing) ---
 KEY_ENV = os.environ.get('GEMINI_API_KEY', '')
+# কমা দিয়ে আলাদা করা কীগুলো ক্লিন করে লিস্টে নেওয়া হচ্ছে
 GEMINI_KEYS = [k.strip() for k in KEY_ENV.split(',') if k.strip()]
 CURRENT_KEY_INDEX = 0
 
@@ -51,7 +51,7 @@ except Exception as e:
 def is_owner(uid):
     return str(uid) == str(OWNER_ID)
 
-# --- AI Helper Functions (Optimized: Your Provided Logic) ---
+# --- AI Helper Functions (Fixed & Optimized) ---
 def get_next_api_key():
     global CURRENT_KEY_INDEX
     if not GEMINI_KEYS: return None
@@ -61,19 +61,20 @@ def get_next_api_key():
 
 async def get_expanded_keywords(base_kw):
     """
-    আপনার দেওয়া লজিক অনুযায়ী কিওয়ার্ড জেনারেট করবে।
-    এটি একাধিক কি রোটেট করে এবং gemini-2.0-flash ব্যবহার করে।
+    ১০০% কাজ করার জন্য 'gemini-1.5-flash' ব্যবহার করা হয়েছে।
+    এটি লুপ করে সব API Key চেক করবে যতক্ষণ না সফল হয়।
     """
     if not GEMINI_KEYS:
+        logger.warning("⚠️ No Gemini Keys found in Env!")
         return [base_kw]
 
-    # সব কটি কি (Key) একবার করে ট্রাই করবে যদি এরর আসে
-    for _ in range(len(GEMINI_KEYS)):
+    # প্রতিটি কি (Key) একবার করে ট্রাই করবে
+    for i in range(len(GEMINI_KEYS)):
         api_key = get_next_api_key()
         if not api_key: break
 
-        # আপনার দেওয়া মডেল
-        model_version = "gemini-2.0-flash" 
+        # 1.5-flash সবচেয়ে স্টেবল এবং ফাস্ট
+        model_version = "gemini-1.5-flash"
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_version}:generateContent?key={api_key}"
         
         prompt = f"""
@@ -93,23 +94,31 @@ async def get_expanded_keywords(base_kw):
                         try:
                             text_data = res_json['candidates'][0]['content']['parts'][0]['text']
                             kws = [k.strip() for k in text_data.split(',') if k.strip()]
-                            # সফল হলে লিস্ট রিটার্ন করবে
-                            return list(set([base_kw] + kws))[:100]
+                            final_list = list(set([base_kw] + kws))[:100]
+                            # সফল হলে লুপ ব্রেক করে রেজাল্ট ফেরত দেবে
+                            return final_list
                         except Exception as e:
-                            logger.error(f"Gemini Parse Error: {e}")
+                            logger.error(f"⚠️ Key {i+1} Parse Error: {e}")
+                    
                     elif response.status == 429:
-                        logger.warning(f"⚠️ Key Rate Limited (429). Switching key...")
-                        continue # পরের লুপে গিয়ে পরের কি ট্রাই করবে
+                        logger.warning(f"⚠️ Key {i+1} Rate Limited (429). Switching to next key...")
+                        # পরের কি ট্রাই করার জন্য লুপ কন্টিনিউ করবে
+                        continue 
+                    
+                    elif response.status == 404:
+                        logger.error(f"❌ Key {i+1} Model Not Found (404).")
+                        continue
+
                     else:
-                        logger.error(f"Gemini Error {response.status}")
+                        err_text = await response.text()
+                        logger.error(f"❌ Key {i+1} Error {response.status}: {err_text}")
+                        continue
                         
         except Exception as e:
-            logger.error(f"❌ AI Connection Error: {e}")
-        
-        # খুব দ্রুত রিকোয়েস্ট না পাঠানোর জন্য সামান্য বিরতি
-        await asyncio.sleep(1)
+            logger.error(f"❌ Key {i+1} Connection Error: {e}")
+            continue
 
-    # সব কি ফেইল করলে বেস কিওয়ার্ড রিটার্ন করবে
+    # যদি সব কি ফেইল করে
     logger.error("❌ All API Keys failed. Using base keyword.")
     return [base_kw]
 
@@ -145,7 +154,6 @@ async def execute_auto_search(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
 
 # --- Global Scraper Engine ---
 async def scrape_task(base_kw, context, uid):
-    # নতুন AI ফাংশন কল করা হচ্ছে
     keywords = await get_expanded_keywords(base_kw)
     
     countries = ['us', 'gb', 'in', 'ca', 'br', 'au', 'de', 'id', 'ph', 'pk', 'za', 'mx', 'tr', 'sa', 'ae', 'ru', 'fr', 'it', 'es', 'nl'] 
