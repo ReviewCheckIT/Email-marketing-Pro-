@@ -27,9 +27,9 @@ FB_URL = os.environ.get('FIREBASE_DATABASE_URL')
 RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL')
 PORT = int(os.environ.get('PORT', '8080'))
 
-# --- Gemini Keys Setup ---
-KEY_ENV = os.environ.get('GEMINI_API_KEY', '')
-GEMINI_KEYS = [k.strip() for k in KEY_ENV.split(',') if k.strip()]
+# --- Groq Keys Setup (Updated from Gemini) ---
+KEY_ENV = os.environ.get('GROQ_API_KEY', '') # এনভায়রনমেন্টে GROQ_API_KEY নামে কি সেভ করবেন
+GROQ_KEYS = [k.strip() for k in KEY_ENV.split(',') if k.strip()]
 CURRENT_KEY_INDEX = 0
 
 FIRESTORE_APP_ID = 'keyword-bot-pro'
@@ -50,39 +50,44 @@ except Exception as e:
 def is_owner(uid):
     return str(uid) == str(OWNER_ID)
 
-# --- AI Helper Functions (Smart Model Fallback) ---
+# --- AI Helper Functions (Updated to Groq) ---
 def get_next_api_key():
     global CURRENT_KEY_INDEX
-    if not GEMINI_KEYS: return None
-    key = GEMINI_KEYS[CURRENT_KEY_INDEX % len(GEMINI_KEYS)]
+    if not GROQ_KEYS: return None
+    key = GROQ_KEYS[CURRENT_KEY_INDEX % len(GROQ_KEYS)]
     CURRENT_KEY_INDEX += 1
     return key
 
 async def get_expanded_keywords(base_kw):
     """
-    AI ফিক্স: এটি এখন একাধিক মডেল ট্রাই করবে।
-    প্রথমে 2.0-flash -> ব্যর্থ হলে 1.5-flash -> ব্যর্থ হলে 1.5-pro
+    AI আপডেট: এখন Groq LPU ব্যবহার করে অবিশ্বাস্য দ্রুত গতিতে কিওয়ার্ড জেনারেট হবে।
+    প্রথমে llama-3.3-70b -> ব্যর্থ হলে llama3-8b -> ব্যর্থ হলে mixtral-8x7b
     """
-    if not GEMINI_KEYS:
-        logger.warning("⚠️ No Gemini Keys found!")
+    if not GROQ_KEYS:
+        logger.warning("⚠️ No Groq Keys found!")
         return [base_kw]
 
-    # মডেলের তালিকা (অগ্রাধিকার অনুযায়ী)
-    models_to_try = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
+    # Groq মডেলের তালিকা
+    models_to_try = ["llama-3.3-70b-versatile", "llama3-8b-8192", "mixtral-8x7b-32768"]
     
-    # কী লুপ
-    for i in range(len(GEMINI_KEYS)):
+    for i in range(len(GROQ_KEYS)):
         api_key = get_next_api_key()
         if not api_key: break
 
-        # মডেল লুপ (প্রতিটি কী দিয়ে সব মডেল ট্রাই করবে)
         for model in models_to_try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+            url = "https://api.groq.com/openai/v1/chat/completions"
             
             prompt = f"Generate 100 unique, broad, and popular search phrases for Google Play Store to find new and unrated apps related to '{base_kw}'. Focus on terms that return maximum results. Provide only comma-separated values."
             
-            payload = {"contents": [{"parts": [{"text": prompt}]}]}
-            headers = {'Content-Type': 'application/json'}
+            payload = {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.7
+            }
+            headers = {
+                'Authorization': f'Bearer {api_key}',
+                'Content-Type': 'application/json'
+            }
 
             try:
                 async with aiohttp.ClientSession() as session:
@@ -90,29 +95,27 @@ async def get_expanded_keywords(base_kw):
                         if response.status == 200:
                             res_json = await response.json()
                             try:
-                                text_data = res_json['candidates'][0]['content']['parts'][0]['text']
+                                text_data = res_json['choices'][0]['message']['content']
                                 kws = [k.strip() for k in text_data.split(',') if k.strip()]
                                 final_list = list(set([base_kw] + kws))[:100]
-                                logger.info(f"✅ Success with Model: {model}")
+                                logger.info(f"✅ Groq Success with Model: {model}")
                                 return final_list
                             except Exception:
-                                continue # পার্স এরর হলে পরের মডেল দেখবে
+                                continue
                         elif response.status == 429:
-                            logger.warning(f"⚠️ Key Rate Limited on {model}. Switching key...")
-                            break # এই কী দিয়ে আর লাভ নেই, লুপ ব্রেক করে পরের কী তে যাবে
+                            logger.warning(f"⚠️ Groq Rate Limited on {model}. Switching key...")
+                            break 
                         else:
-                            # 404 বা অন্য এরর হলে পরের মডেল দেখবে
                             continue 
             except Exception as e:
-                logger.error(f"Connection Error on {model}: {e}")
+                logger.error(f"Groq Connection Error on {model}: {e}")
                 continue
 
-    logger.error("❌ All AI attempts failed. Using base keyword.")
+    logger.error("❌ All Groq attempts failed. Using base keyword.")
     return [base_kw]
 
 # --- Helper: Fetch Keyword & Trigger Search ---
 async def execute_auto_search(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
-    # শুরুতেই চেক
     if context.user_data.get('stop_signal'):
         context.user_data['auto_loop'] = False
         context.user_data['stop_signal'] = False
@@ -142,18 +145,17 @@ async def execute_auto_search(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
         context.user_data['auto_loop'] = False
         await context.bot.send_message(chat_id=chat_id, text=f"⚠️ এরর: {e}")
 
-# --- Global Scraper Engine (Optimized for Immediate Stop) ---
+# --- Global Scraper Engine ---
 async def scrape_task(base_kw, context, uid):
-    # স্টপ সিগন্যাল রিসেট
     context.user_data['stop_signal'] = False
     
     keywords = await get_expanded_keywords(base_kw)
     countries = ['us', 'gb', 'in', 'ca', 'br', 'au', 'de', 'id', 'ph', 'pk', 'za', 'mx', 'tr', 'sa', 'ae', 'ru', 'fr', 'it', 'es', 'nl'] 
     
-    # বাটন সেটআপ
     stop_btn = [[InlineKeyboardButton("🛑 Stop Auto Search", callback_data='stop_loop')]]
     
-    msg_text = f"🌍 **মেগা সার্চ শুরু!** \n🔍 নিস: {base_kw}\n🎯 কিওয়ার্ড: {len(keywords)}টি\n(Cloud Keyword)" if context.user_data.get('from_cloud') else f"🌍 **মেগা সার্চ শুরু!** \n🔍 নিস: {base_kw}\n🎯 কিওয়ার্ড: {len(keywords)}টি"
+    msg_text = f"🌍 **মেগা সার্চ শুরু (Groq AI)!** \n🔍 নিস: {base_kw}\n🎯 কিওয়ার্ড: {len(keywords)}টি"
+    if context.user_data.get('from_cloud'): msg_text += "\n(Cloud Keyword)"
     
     status_msg = await context.bot.send_message(uid, msg_text, reply_markup=InlineKeyboardMarkup(stop_btn))
     
@@ -162,13 +164,10 @@ async def scrape_task(base_kw, context, uid):
     ref = db.reference('scraped_emails')
     processed_apps = set()
 
-    # মেইন লুপ
     for kw in keywords:
-        # 1. কিওয়ার্ড লুপের শুরুতে স্টপ চেক
         if context.user_data.get('stop_signal'): break
 
         for lang_country in countries:
-            # 2. কান্ট্রি লুপের শুরুতে স্টপ চেক (আরও ফাস্ট রেসপন্সের জন্য)
             if context.user_data.get('stop_signal'): break
 
             try:
@@ -176,7 +175,6 @@ async def scrape_task(base_kw, context, uid):
                 if not results: continue
 
                 for r in results:
-                    # 3. প্রতিটি অ্যাপ প্রসেসিংয়ের আগে স্টপ চেক (তাৎক্ষণিক থামার জন্য)
                     if context.user_data.get('stop_signal'): break
 
                     app_id = r['appId']
@@ -208,20 +206,12 @@ async def scrape_task(base_kw, context, uid):
                                     session_leads.append(data)
                                     new_count += 1
                     except: continue
-                
-                # প্রগ্রেস আপডেট
-                if new_count > 0 and new_count % 30 == 0:
-                    # লগের বদলে টেলিগ্রামে এডিট করলে ইউজার বুঝতে পারবে কাজ চলছে
-                    pass 
-                
                 await asyncio.sleep(1) 
             except: continue
     
-    # লুপ শেষ বা ব্রেক হওয়ার পর
     if context.user_data.get('stop_signal'):
         await context.bot.send_message(uid, f"🛑 সার্চ মাঝপথে থামানো হয়েছে।\nসংগৃহীত লিড: {new_count}টি")
     else:
-        # স্বাভাবিক সমাপ্তি
         if session_leads:
             si = io.StringIO()
             cw = csv.writer(si)
@@ -235,8 +225,6 @@ async def scrape_task(base_kw, context, uid):
         else:
             await context.bot.send_message(uid, f"❌ '{base_kw}' দিয়ে কোনো নতুন লিড পাওয়া যায়নি।")
 
-    # --- অটোমেটিক লুপ লজিক ---
-    # যদি স্টপ সিগন্যাল না থাকে এবং অটো লুপ অন থাকে, তবেই কন্টিনিউ করবে
     if not context.user_data.get('stop_signal') and context.user_data.get('auto_loop'):
         await asyncio.sleep(5) 
         await context.bot.send_message(uid, "🔄 পরবর্তী কিওয়ার্ড লোড করা হচ্ছে...")
@@ -246,7 +234,7 @@ async def scrape_task(base_kw, context, uid):
 async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not is_owner(u.effective_user.id): return
     btn = [[InlineKeyboardButton("🤖 অটো কিওয়ার্ড সার্চ (Firebase Loop)", callback_data='auto_s')]]
-    await u.message.reply_text("বট অনলাইন! আমি প্রস্তুত।", reply_markup=InlineKeyboardMarkup(btn))
+    await u.message.reply_text("বট অনলাইন (Groq AI Enabled)! আমি প্রস্তুত।", reply_markup=InlineKeyboardMarkup(btn))
 
 async def stats(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not is_owner(u.effective_user.id): return
@@ -276,7 +264,6 @@ async def clear_db(u: Update, c: ContextTypes.DEFAULT_TYPE):
     db.reference('scraped_emails').delete()
     await u.message.reply_text("🗑️ সব ডেটা ডিলিট করা হয়েছে।")
 
-# --- Callback Handler (Stop Signal Fix) ---
 async def cb(u: Update, c: ContextTypes.DEFAULT_TYPE):
     q = u.callback_query
     if not is_owner(q.from_user.id): return
@@ -284,27 +271,23 @@ async def cb(u: Update, c: ContextTypes.DEFAULT_TYPE):
     
     if q.data == 'auto_s':
         c.user_data['auto_loop'] = True
-        c.user_data['stop_signal'] = False # রিসেট
+        c.user_data['stop_signal'] = False
         await q.edit_message_text("🔄 অটোমেটিক লুপ মোড চালু হয়েছে। ফায়ারবেস চেক করা হচ্ছে...")
         await execute_auto_search(c, u.effective_chat.id)
 
     elif q.data == 'stop_loop':
-        # এখানে ফ্ল্যাগ সেট করা হলো যা লুপের ভেতরে চেক হবে
         c.user_data['stop_signal'] = True 
         c.user_data['auto_loop'] = False
         await q.edit_message_text("🛑 থামার নির্দেশ পাঠানো হয়েছে... এখনই থেমে যাবে।")
 
 async def msg(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not is_owner(u.effective_user.id): return
-    
-    if c.user_data.get('state') == 'kw':
-        c.user_data['state'] = None
-        keyword = u.message.text
-        c.user_data['auto_loop'] = False 
-        c.user_data['stop_signal'] = False
-        c.user_data['from_cloud'] = False
-        asyncio.create_task(scrape_task(keyword, c, u.effective_user.id))
-        await u.message.reply_text(f"🔍 ম্যানুয়াল ইনপুট '{keyword}' গ্রহণ করা হয়েছে। সার্চ চলছে...")
+    keyword = u.message.text
+    c.user_data['auto_loop'] = False 
+    c.user_data['stop_signal'] = False
+    c.user_data['from_cloud'] = False
+    asyncio.create_task(scrape_task(keyword, c, u.effective_user.id))
+    await u.message.reply_text(f"🔍 ম্যানুয়াল ইনপুট '{keyword}' গ্রহণ করা হয়েছে। সার্চ চলছে...")
 
 def main():
     if not TOKEN: return
