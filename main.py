@@ -44,13 +44,13 @@ except Exception as e:
     sys.exit(1)
 
 def is_owner(uid):
-    return str(uid) == str(OWNER_ID)
-
-# --- AI Deep Keyword Expansion (Fixed 429 Error with Retry) ---
+# --- AI Deep Keyword Expansion (Updated: Using Stable Model 1.5-Flash) ---
 async def get_expanded_keywords(base_kw):
     if not GEMINI_KEY: return [base_kw]
     
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}"
+    # পরিবর্তন: মডেল 2.0 এর বদলে 1.5-flash ব্যবহার করা হচ্ছে (এটি বেশি স্টেবল)
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
+    
     headers = {'Content-Type': 'application/json'}
     
     prompt_text = f"Generate 100 unique, broad, and popular search phrases for Google Play Store to find new and unrated apps related to '{base_kw}'. Focus on terms that return maximum results. Provide only comma-separated values."
@@ -61,7 +61,6 @@ async def get_expanded_keywords(base_kw):
         }]
     }
 
-    # Retry logic added specifically for 429 errors
     max_retries = 3
     for attempt in range(max_retries):
         try:
@@ -75,14 +74,20 @@ async def get_expanded_keywords(base_kw):
                             final_list = list(set([base_kw] + kws))[:100]
                             return final_list
                         except (KeyError, IndexError):
+                            logger.error(f"Gemini Parse Error: {result}") # রেসপন্স স্ট্রাকচার লগ করা হলো
                             return [base_kw]
+                    
                     elif response.status == 429:
-                        wait_time = 10 * (attempt + 1)
-                        logger.warning(f"⚠️ Gemini Rate Limit (429). Waiting {wait_time}s before retry...")
+                        wait_time = 20 * (attempt + 1) # সময় বাড়িয়ে ২০ সেকেন্ড থেকে শুরু
+                        logger.warning(f"⚠️ Gemini Rate Limit (429). Waiting {wait_time}s...")
                         await asyncio.sleep(wait_time)
+                    
                     else:
-                        logger.error(f"Gemini API Error: {response.status}")
+                        # আসল এরর মেসেজ দেখার জন্য
+                        error_text = await response.text()
+                        logger.error(f"Gemini API Error {response.status}: {error_text}")
                         return [base_kw]
+                        
         except Exception as e:
             logger.error(f"Gemini Connection Error: {e}")
             return [base_kw]
