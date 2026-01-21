@@ -46,12 +46,12 @@ except Exception as e:
 def is_owner(uid):
     return str(uid) == str(OWNER_ID)
 
-# --- AI Deep Keyword Expansion (Updated: Uses Stable 1.5-Flash Model) ---
+# --- AI Deep Keyword Expansion (Updated: Uses Standard 'gemini-pro' Model) ---
 async def get_expanded_keywords(base_kw):
     if not GEMINI_KEY: return [base_kw]
     
-    # পরিবর্তন: 1.5-flash মডেল ব্যবহার করা হচ্ছে (এটি বেশি স্টেবল এবং 429 এরর কম দেয়)
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
+    # পরিবর্তন: 'gemini-pro' ব্যবহার করা হয়েছে যা সব অ্যাকাউন্টে কাজ করে (No 404 Error)
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={GEMINI_KEY}"
     
     headers = {'Content-Type': 'application/json'}
     
@@ -63,7 +63,7 @@ async def get_expanded_keywords(base_kw):
         }]
     }
 
-    # Retry Logic: 20s -> 40s -> 60s
+    # Retry Logic with Error Handling
     max_retries = 3
     for attempt in range(max_retries):
         try:
@@ -72,12 +72,17 @@ async def get_expanded_keywords(base_kw):
                     if response.status == 200:
                         result = await response.json()
                         try:
-                            text_data = result['candidates'][0]['content']['parts'][0]['text']
-                            kws = [k.strip() for k in text_data.split(',') if k.strip()]
-                            final_list = list(set([base_kw] + kws))[:100]
-                            return final_list
-                        except (KeyError, IndexError):
-                            logger.error(f"Gemini Parse Error: {result}")
+                            # Gemini Pro রেসপন্স পার্সিং
+                            if 'candidates' in result and result['candidates']:
+                                text_data = result['candidates'][0]['content']['parts'][0]['text']
+                                kws = [k.strip() for k in text_data.split(',') if k.strip()]
+                                final_list = list(set([base_kw] + kws))[:100]
+                                return final_list
+                            else:
+                                logger.error(f"Gemini Empty Response: {result}")
+                                return [base_kw]
+                        except Exception as e:
+                            logger.error(f"Gemini Parse Error: {e}")
                             return [base_kw]
                     
                     elif response.status == 429:
@@ -88,8 +93,10 @@ async def get_expanded_keywords(base_kw):
                     else:
                         error_text = await response.text()
                         logger.error(f"Gemini API Error {response.status}: {error_text}")
-                        # 429 বাদে অন্য এরর হলে রি-ট্রাই করে লাভ নেই
-                        return [base_kw]
+                        # 404 বা অন্য এরর হলে সাথে সাথে রিটার্ন করবে, রি-ট্রাই করবে না
+                        if response.status == 404:
+                            logger.error("❌ Model Not Found (404). Check API Key or Region.")
+                            return [base_kw]
                         
         except Exception as e:
             logger.error(f"Gemini Connection Error: {e}")
@@ -99,9 +106,7 @@ async def get_expanded_keywords(base_kw):
     return [base_kw]
 
 # --- Helper: Fetch Keyword & Trigger Search ---
-# Chat ID সরাসরি গ্রহণ করে
 async def execute_auto_search(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
-    # লুপ চালু আছে কিনা চেক করা
     if not context.user_data.get('auto_loop'):
         await context.bot.send_message(chat_id=chat_id, text="🛑 অটো সার্চ বন্ধ করা হয়েছে।")
         return
@@ -121,10 +126,9 @@ async def execute_auto_search(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
             doc.reference.delete()
             
             context.user_data['from_cloud'] = True
-            # সার্চ টাস্ক কল করা (সরাসরি চ্যাট আইডি পাস করা হচ্ছে)
             await scrape_task(keyword, context, chat_id)
         else:
-            context.user_data['auto_loop'] = False # লুপ বন্ধ
+            context.user_data['auto_loop'] = False 
             await context.bot.send_message(chat_id=chat_id, text="⚠️ ফায়ারবেসে আর কোনো কিওয়ার্ড নেই। অটো সার্চ সমাপ্ত।")
             
     except Exception as e:
@@ -212,7 +216,7 @@ async def scrape_task(base_kw, context, uid):
 
     # --- অটোমেটিক লুপ লজিক ---
     if context.user_data.get('auto_loop') and should_continue:
-        await asyncio.sleep(5) # ৫ সেকেন্ড বিরতি
+        await asyncio.sleep(5) 
         await context.bot.send_message(uid, "🔄 পরবর্তী কিওয়ার্ড লোড করা হচ্ছে...")
         await execute_auto_search(context, uid)
 
@@ -259,7 +263,6 @@ async def cb(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if q.data == 'auto_s':
         c.user_data['auto_loop'] = True
         await q.edit_message_text("🔄 অটোমেটিক লুপ মোড চালু হয়েছে। ফায়ারবেস চেক করা হচ্ছে...")
-        # এখানে সরাসরি chat_id পাস করা হচ্ছে
         await execute_auto_search(c, u.effective_chat.id)
 
     elif q.data == 'stop_loop':
