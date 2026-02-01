@@ -196,7 +196,7 @@ async def scrape_task(base_kw, context, uid, is_auto=False):
                             ref.child(safe_id).set(data)
                             leads.append(data)
                             new_count += 1
-                            session_stats['total_leads'] += 1
+                            session_stats['total_emails'] += 1
 
                         except: continue
                 except: continue
