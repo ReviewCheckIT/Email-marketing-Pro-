@@ -32,8 +32,7 @@ KEY_ENV = os.environ.get('GROQ_API_KEY', '')
 GROQ_KEYS = [k.strip() for k in KEY_ENV.split(',') if k.strip()]
 CURRENT_KEY_INDEX = 0
 
-# --- Global Tracker for Tasks ---
-# এই ডিকশনারিটি চলমান টাস্কগুলোকে ট্র্যাক করবে যাতে সাথে সাথে ক্যান্সেল করা যায়
+# --- Global Tracker ---
 active_tasks = {}
 
 # --- Firebase Init ---
@@ -73,73 +72,110 @@ async def get_expanded_keywords(base_kw):
     except: pass
     return [base_kw]
 
-# --- Scraper Engine with Force Stop ---
+# --- Helper: Strict Zero Check ---
+def is_strictly_zero_rated(app_data):
+    """চেক করবে স্কোর, রেটিং কাউন্ট এবং হিস্টোগ্রাম সব ০ কি না"""
+    score = app_data.get('score') or 0
+    ratings = app_data.get('ratings') or 0
+    histogram = app_data.get('histogram') or [0, 0, 0, 0, 0]
+    total_votes = sum(histogram)
+    return score == 0 and ratings == 0 and total_votes == 0
+
+# --- Scraper Engine ---
 async def scrape_task(base_kw, context, uid, is_auto=False):
-    # স্টপ ফ্ল্যাগ রিসেট
     context.user_data['stop_signal'] = False
     
     stop_btn = [[InlineKeyboardButton("🛑 STOP IMMEDIATELY", callback_data='stop_loop')]]
-    status_msg = await context.bot.send_message(uid, f"🔍 সার্চিং: {base_kw}...", reply_markup=InlineKeyboardMarkup(stop_btn))
+    await context.bot.send_message(uid, f"🔍 গ্লোবাল জিরো সার্চ: {base_kw}...", reply_markup=InlineKeyboardMarkup(stop_btn))
     
     new_count = 0
     session_leads = []
     ref = db.reference('scraped_emails')
     keywords = await get_expanded_keywords(base_kw)
-    countries = ['us', 'gb', 'in', 'ca', 'br', 'au', 'de', 'id', 'ph', 'pk', 'za', 'mx', 'tr', 'sa', 'ae', 'ru', 'fr', 'it', 'es', 'nl']
+    
+    # টার্গেট কান্ট্রি লিস্ট
+    countries = ['us', 'gb', 'in', 'ca', 'br', 'au', 'de', 'id', 'ph', 'pk', 'tr', 'sa', 'ae', 'fr', 'it', 'es']
 
     try:
         for kw in keywords:
-            # চেক ১: কাজ শুরুতেই থামানো হয়েছে কি না
             if context.user_data.get('stop_signal'): return
 
             for lang_country in countries:
-                # চেক ২: কান্ট্রি পরিবর্তনের সময়
                 if context.user_data.get('stop_signal'): return
-                
-                # লুপকে শ্বাস নেওয়ার সুযোগ দেওয়া (যাতে বাটন ক্লিক প্রসেস হতে পারে)
                 await asyncio.sleep(0.1)
 
                 try:
-                    # ছোট ব্যাচে সার্চ করা যাতে দ্রুত ইন্টারাপ্ট করা যায়
+                    # ১. প্রথমে টার্গেট দেশে সার্চ
                     results = play_search(kw, n_hits=20, lang='en', country=lang_country)
                     if not results: continue
 
                     for r in results:
-                        # চেক ৩: প্রতিটি অ্যাপ প্রসেস করার আগে (সবচাইতে শক্তিশালী চেক)
                         if context.user_data.get('stop_signal'):
                             logger.info("Force Stop Triggered!")
-                            return # ফাংশন থেকে সরাসরি বের হয়ে যাবে
+                            return
 
                         app_id = r['appId']
+                        
                         try:
-                            app = app_details(app_id, lang='en', country=lang_country)
-                            if app and (app.get('score') or 0) == 0:
-                                email = app.get('developerEmail', '').lower().strip()
-                                if email:
-                                    email_key = email.replace('.', '_').replace('@', '_at_')
-                                    if not ref.child(email_key).get():
-                                        data = {'app_name': app.get('title'), 'email': email, 'installs': app.get('installs'), 'country': lang_country, 'timestamp': datetime.now().isoformat()}
-                                        ref.child(email_key).set(data)
-                                        session_leads.append(data)
-                                        new_count += 1
+                            # ২. টার্গেট দেশের ডিটেইলস চেক
+                            local_app = app_details(app_id, lang='en', country=lang_country)
+                            
+                            # যদি টার্গেট দেশে জিরো রেটিং হয়, তবেই আমরা গ্লোবাল চেক করব
+                            if local_app and is_strictly_zero_rated(local_app):
+                                
+                                # ৩. ডাবল ভেরিফিকেশন (Global/US Check)
+                                # যদি বর্তমান দেশ US না হয়, তবে আমরা US চেক করব।
+                                # কারণ US-এ জিরো মানেই অ্যাপটি গ্লোবালি নতুন।
+                                is_globally_zero = True
+                                
+                                if lang_country != 'us':
+                                    try:
+                                        us_app = app_details(app_id, lang='en', country='us')
+                                        if not is_strictly_zero_rated(us_app):
+                                            is_globally_zero = False # US-এ রেটিং আছে, তাই বাদ
+                                    except:
+                                        # US ডেটা না পেলে আমরা রিস্ক নেব না, ধরে নেব ঠিক আছে অথবা স্কিপ করব
+                                        # এখানে আমরা কঠোর হচ্ছি, US ডেটা না পেলে স্কিপ করছি না, তবে লোকাল ডেটাকেই প্রাধান্য দিচ্ছি
+                                        pass
+                                
+                                if is_globally_zero:
+                                    email = local_app.get('developerEmail', '').lower().strip()
+                                    if email:
+                                        email_key = email.replace('.', '_').replace('@', '_at_')
+                                        if not ref.child(email_key).get():
+                                            # ভেরিফিকেশন লিংক (US লিংক দিচ্ছি যাতে আপনি গ্লোবাল ভিউ পান)
+                                            store_link = f"https://play.google.com/store/apps/details?id={app_id}&gl=us"
+                                            
+                                            data = {
+                                                'app_name': local_app.get('title'),
+                                                'email': email,
+                                                'installs': local_app.get('installs'),
+                                                'country': f"{lang_country} (Verified via US)",
+                                                'store_link': store_link,
+                                                'timestamp': datetime.now().isoformat()
+                                            }
+                                            ref.child(email_key).set(data)
+                                            session_leads.append(data)
+                                            new_count += 1
                         except: continue
                 except: continue
         
-        # সফলভাবে শেষ হলে ফাইল পাঠানো
+        # CSV ফাইল তৈরি ও প্রেরণ
         if session_leads:
             si = io.StringIO()
             cw = csv.writer(si)
-            cw.writerow(['App Name', 'Email', 'Installs', 'Country', 'Date'])
-            for v in session_leads: cw.writerow([v['app_name'], v['email'], v['installs'], v['country'], v['timestamp']])
-            output = io.BytesIO(si.getvalue().encode()); output.name = f"Leads_{base_kw}.csv"
-            await context.bot.send_document(uid, document=output, caption=f"✅ শেষ: {base_kw}\n🔥 লিড: {new_count}")
+            cw.writerow(['App Name', 'Email', 'Installs', 'Source Country', 'Global Link', 'Date'])
+            for v in session_leads: 
+                cw.writerow([v['app_name'], v['email'], v['installs'], v['country'], v['store_link'], v['timestamp']])
+            
+            output = io.BytesIO(si.getvalue().encode())
+            output.name = f"Global_Zero_{base_kw}.csv"
+            await context.bot.send_document(uid, document=output, caption=f"✅ প্রসেস শেষ: {base_kw}\n🌍 গ্লোবাল জিরো লিড: {new_count}")
 
     except asyncio.CancelledError:
-        # যদি টাস্কটি সিস্টেম থেকে ক্যান্সেল করা হয়
         logger.info("Task was cancelled.")
         return
     finally:
-        # অটো লুপ হ্যান্ডলিং (যদি মাঝপথে থামানো না হয়)
         if not context.user_data.get('stop_signal') and is_auto:
             await asyncio.sleep(2)
             await execute_auto_search(context, uid)
@@ -154,7 +190,6 @@ async def execute_auto_search(context, uid):
     if docs:
         kw = docs[0].to_dict().get('word')
         docs[0].reference.delete()
-        # টাস্ক ট্র্যাকিং শুরু
         task = asyncio.create_task(scrape_task(kw, context, uid, is_auto=True))
         active_tasks[uid] = task
     else:
@@ -164,10 +199,10 @@ async def execute_auto_search(context, uid):
 async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not is_owner(u.effective_user.id): return
     btns = [
-        [InlineKeyboardButton("🤖 অটো সার্চ শুরু", callback_data='auto_s')],
-        [InlineKeyboardButton("🔄 রিফ্রেশ/রিসেট বট", callback_data='refresh_bot')]
+        [InlineKeyboardButton("🤖 অটো গ্লোবাল সার্চ", callback_data='auto_s')],
+        [InlineKeyboardButton("🔄 রিফ্রেশ বট", callback_data='refresh_bot')]
     ]
-    await u.message.reply_text("বট প্রস্তুত। যেকোনো সমস্যা হলে রিফ্রেশ করুন।", reply_markup=InlineKeyboardMarkup(btns))
+    await u.message.reply_text("বট রেডি। এখন 'US Cross-Check' মোড অন করা হয়েছে।", reply_markup=InlineKeyboardMarkup(btns))
 
 async def cb(u: Update, c: ContextTypes.DEFAULT_TYPE):
     q = u.callback_query
@@ -176,26 +211,22 @@ async def cb(u: Update, c: ContextTypes.DEFAULT_TYPE):
     
     if q.data == 'auto_s':
         c.user_data['stop_signal'] = False
-        await q.edit_message_text("🔄 অটো মোড শুরু হচ্ছে...")
+        await q.edit_message_text("🔄 অটো গ্লোবাল ফিল্টার মোড চালু...")
         await execute_auto_search(c, uid)
 
     elif q.data == 'stop_loop':
-        # ১. সিগন্যাল সেট করা
         c.user_data['stop_signal'] = True
-        c.user_data['auto_loop'] = False
-        # ২. টাস্ক ক্যান্সেল করা (জোরপূর্বক থামালে এটি দ্রুত কাজ করে)
         if uid in active_tasks:
             active_tasks[uid].cancel()
             del active_tasks[uid]
-        await q.edit_message_text("🛑 কাজ বন্ধ করা হয়েছে। বট এখন ফ্রি।")
+        await q.edit_message_text("🛑 থামানো হয়েছে।")
 
     elif q.data == 'refresh_bot':
-        # রিফ্রেশ বাটন যা সবকিছু ক্লিন করবে
         c.user_data.clear()
         if uid in active_tasks:
             active_tasks[uid].cancel()
             del active_tasks[uid]
-        await q.edit_message_text("♻️ বট রিফ্রেশ করা হয়েছে। আগের সব প্রসেস ডিলিট করা হয়েছে। আপনি এখন নতুন করে শুরু করতে পারেন।")
+        await q.edit_message_text("♻️ সব ক্লিয়ার করা হয়েছে।")
 
 async def msg(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not is_owner(u.effective_user.id): return
