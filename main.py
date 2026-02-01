@@ -253,21 +253,20 @@ async def cb_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     
     if q.data == 'check_health':
-        # Perform a real connectivity test
         try:
             db.reference('health_check').set({"status": "ok", "time": str(datetime.now())})
             fb_status = "✅ Connected & Writeable"
         except Exception as e:
             fb_status = f"❌ Error: {str(e)[:50]}"
-            
+        
         tasks = len(active_tasks)
         await q.message.reply_text(f"🩺 **System Diagnosis:**\n\n• Firebase: {fb_status}\n• DB Path: scraped_emails\n• Active Tasks: {tasks}\n• Groq Keys: {len(GROQ_KEYS)}", parse_mode='Markdown')
 
     elif q.data == 'dl_all':
         await q.message.reply_text("⏳ **Fetching all data from Database...**\nDepending on size, this may take a few seconds.")
         try:
-            # Run in thread to prevent blocking
             ref = db.reference('scraped_emails')
+            # Run in thread to allow bot to remain responsive
             all_data = await asyncio.to_thread(ref.get)
             
             if all_data:
@@ -277,24 +276,27 @@ async def cb_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
                 
                 count = 0
                 for key, v in all_data.items():
-                    cw.writerow([
-                        v.get('app_name'), 
-                        v.get('email'), 
-                        v.get('website'), 
-                        v.get('installs'), 
-                        v.get('country'), 
-                        v.get('keyword', 'N/A'),
-                        v.get('date', 'N/A')
-                    ])
-                    count += 1
+                    if isinstance(v, dict):
+                        cw.writerow([
+                            v.get('app_name', 'N/A'), 
+                            v.get('email', 'N/A'), 
+                            v.get('website', 'N/A'), 
+                            v.get('installs', 'N/A'), 
+                            v.get('country', 'N/A'), 
+                            v.get('keyword', 'N/A'),
+                            v.get('date', 'N/A')
+                        ])
+                        count += 1
                 
                 output = io.BytesIO(si.getvalue().encode('utf-8'))
                 output.name = f"Full_Database_{datetime.now().strftime('%Y%m%d')}.csv"
                 
-                await context.bot.send_document(uid, output, caption=f"✅ **Database Downloaded**\n\n📂 Total Records: {count}")
+                # FIX: Used 'c.bot' instead of 'context.bot'
+                await c.bot.send_document(uid, output, caption=f"✅ **Database Downloaded**\n\n📂 Total Records: {count}")
             else:
                 await q.message.reply_text("⚠️ Database is empty.")
         except Exception as e:
+            logger.error(f"Download Error: {e}")
             await q.message.reply_text(f"❌ Error downloading: {e}")
 
     elif q.data == 'stats':
