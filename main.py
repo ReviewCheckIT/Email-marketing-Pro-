@@ -114,7 +114,6 @@ async def scrape_task(base_kw, context, uid, is_auto=False):
     session_stats['status'] = f"Running: {base_kw}"
     session_stats['start_time'] = datetime.now()
     
-    # Dashboard Control Message
     status_text = (
         f"🚀 **Search Started**\n"
         f"🔑 Keyword: `{base_kw}`\n"
@@ -131,8 +130,6 @@ async def scrape_task(base_kw, context, uid, is_auto=False):
     
     leads = []
     new_count = 0
-    
-    # --- CHANGE: Path set to scraped_emails ---
     ref = db.reference('scraped_emails')
     
     keywords = await get_expanded_keywords(base_kw)
@@ -143,8 +140,6 @@ async def scrape_task(base_kw, context, uid, is_auto=False):
     try:
         for kw_idx, kw in enumerate(keywords):
             if context.user_data.get('stop_signal'): break
-            
-            # Update user every 5 keywords
             if kw_idx % 5 == 0:
                 try:
                     await context.bot.edit_message_text(
@@ -163,27 +158,19 @@ async def scrape_task(base_kw, context, uid, is_auto=False):
 
                     for r in results:
                         if context.user_data.get('stop_signal'): break
-                        
                         app_id = r['appId']
-                        # Firebase keys cannot have '.', replace with '_'
-                        # We use email as key if possible, or AppID? 
-                        # Using AppID is safer for uniqueness, but if you want email based uniqueness:
                         
                         try:
                             app = await asyncio.to_thread(app_details, app_id, lang='en', country=country)
                             if not app: continue
 
-                            # Filters
                             installs = parse_installs(app.get('installs', '0'))
                             if installs >= 10000: continue
                             
                             email = app.get('developerEmail', '').lower().strip()
                             if not await validate_email(email): continue
                             
-                            # Create a safe key based on email to prevent duplicates across different apps/versions
                             safe_key = email.replace('.', '_').replace('@', '_at_')
-                            
-                            # Check DB duplicates
                             if ref.child(safe_key).get(): continue
 
                             data = {
@@ -197,9 +184,7 @@ async def scrape_task(base_kw, context, uid, is_auto=False):
                                 'date': datetime.now().isoformat()
                             }
                             
-                            # Save using Email as Key (to ensure unique emails in DB)
                             ref.child(safe_key).set(data)
-                            
                             leads.append(data)
                             new_count += 1
                             session_stats['total_leads'] += 1
@@ -207,7 +192,6 @@ async def scrape_task(base_kw, context, uid, is_auto=False):
                         except: continue
                 except: continue
         
-        # Finish
         session_stats['status'] = "Idle"
         if leads:
             si = io.StringIO()
@@ -257,8 +241,9 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     )
     
     btns = [
-        [InlineKeyboardButton("✅ Health Check", callback_data='check_health'), InlineKeyboardButton("📊 Get Stats", callback_data='stats')],
-        [InlineKeyboardButton("🤖 Auto Mode", callback_data='auto_s'), InlineKeyboardButton("♻️ Reset Bot", callback_data='refresh_bot')]
+        [InlineKeyboardButton("✅ Health Check", callback_data='check_health'), InlineKeyboardButton("📥 Download All DB", callback_data='dl_all')],
+        [InlineKeyboardButton("🤖 Auto Mode", callback_data='auto_s'), InlineKeyboardButton("♻️ Reset Bot", callback_data='refresh_bot')],
+        [InlineKeyboardButton("📊 Live Stats", callback_data='stats')]
     ]
     await u.message.reply_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(btns))
 
@@ -268,9 +253,49 @@ async def cb_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     
     if q.data == 'check_health':
-        fb_status = "✅ Connected" if fs_client else "❌ Failed"
+        # Perform a real connectivity test
+        try:
+            db.reference('health_check').set({"status": "ok", "time": str(datetime.now())})
+            fb_status = "✅ Connected & Writeable"
+        except Exception as e:
+            fb_status = f"❌ Error: {str(e)[:50]}"
+            
         tasks = len(active_tasks)
-        await q.message.reply_text(f"🩺 **System Diagnosis:**\n\n• Firebase: {fb_status}\n• DB Path: scraped_emails\n• Active Tasks: {tasks}\n• Memory: OK", parse_mode='Markdown')
+        await q.message.reply_text(f"🩺 **System Diagnosis:**\n\n• Firebase: {fb_status}\n• DB Path: scraped_emails\n• Active Tasks: {tasks}\n• Groq Keys: {len(GROQ_KEYS)}", parse_mode='Markdown')
+
+    elif q.data == 'dl_all':
+        await q.message.reply_text("⏳ **Fetching all data from Database...**\nDepending on size, this may take a few seconds.")
+        try:
+            # Run in thread to prevent blocking
+            ref = db.reference('scraped_emails')
+            all_data = await asyncio.to_thread(ref.get)
+            
+            if all_data:
+                si = io.StringIO()
+                cw = csv.writer(si)
+                cw.writerow(['App Name', 'Email', 'Website', 'Installs', 'Country', 'Keyword', 'Date'])
+                
+                count = 0
+                for key, v in all_data.items():
+                    cw.writerow([
+                        v.get('app_name'), 
+                        v.get('email'), 
+                        v.get('website'), 
+                        v.get('installs'), 
+                        v.get('country'), 
+                        v.get('keyword', 'N/A'),
+                        v.get('date', 'N/A')
+                    ])
+                    count += 1
+                
+                output = io.BytesIO(si.getvalue().encode('utf-8'))
+                output.name = f"Full_Database_{datetime.now().strftime('%Y%m%d')}.csv"
+                
+                await context.bot.send_document(uid, output, caption=f"✅ **Database Downloaded**\n\n📂 Total Records: {count}")
+            else:
+                await q.message.reply_text("⚠️ Database is empty.")
+        except Exception as e:
+            await q.message.reply_text(f"❌ Error downloading: {e}")
 
     elif q.data == 'stats':
         dur = "0m"
