@@ -42,13 +42,13 @@ GROQ_KEYS = [k.strip() for k in KEY_ENV.split(',') if k.strip()]
 
 # Global State
 active_tasks = {}
-session_stats = {'total_leads': 0, 'start_time': None, 'status': 'Idle'}
+session_stats = {'total_emails': 0, 'start_time': None, 'status': 'Idle'}
 
 # --- Firebase Initialization ---
 try:
     if not firebase_admin._apps:
         if isinstance(FB_JSON, str):
-            cred_dict = json.loads(FB_JSON)
+            cred_dict = json.emails(FB_JSON)
         else:
             cred_dict = FB_JSON
         cred = credentials.Certificate(cred_dict)
