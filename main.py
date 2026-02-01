@@ -132,7 +132,7 @@ async def scrape_task(base_kw, context, uid, is_auto=False):
     
     leads = []
     new_count = 0
-    ref = db.reference('scraped_leads')
+    ref = db.reference('scraped_emails')
     
     keywords = await get_expanded_keywords(base_kw)
     await context.bot.edit_message_text(f"✅ Generated {len(keywords)} keywords. Starting scraper...", chat_id=uid, message_id=status_msg.message_id, reply_markup=markup)
