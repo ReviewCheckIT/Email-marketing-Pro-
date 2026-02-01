@@ -42,13 +42,13 @@ GROQ_KEYS = [k.strip() for k in KEY_ENV.split(',') if k.strip()]
 
 # Global State
 active_tasks = {}
-session_stats = {'total_emails': 0, 'start_time': None, 'status': 'Idle'}
+session_stats = {'total_leads': 0, 'start_time': None, 'status': 'Idle'}
 
 # --- Firebase Initialization ---
 try:
     if not firebase_admin._apps:
         if isinstance(FB_JSON, str):
-            cred_dict = json.emails(FB_JSON)
+            cred_dict = json.loads(FB_JSON)
         else:
             cred_dict = FB_JSON
         cred = credentials.Certificate(cred_dict)
@@ -57,7 +57,6 @@ try:
     logger.info("✅ Firebase Connected")
 except Exception as e:
     logger.error(f"❌ Firebase Error: {e}")
-    # We don't exit here to let the bot report the error to user via Telegram
     fs_client = None
 
 # --- Helper Functions ---
@@ -83,7 +82,6 @@ async def validate_email(email):
     except: return False
 
 async def send_log(context, uid, message):
-    """Send debug logs directly to Telegram chat"""
     try:
         await context.bot.send_message(uid, f"🛠 **Log:** {message}", parse_mode='Markdown')
     except: pass
@@ -121,6 +119,7 @@ async def scrape_task(base_kw, context, uid, is_auto=False):
         f"🚀 **Search Started**\n"
         f"🔑 Keyword: `{base_kw}`\n"
         f"🎯 Filter: <10k Installs\n"
+        f"💾 Saving to: `scraped_emails`\n"
         f"⏳ Generating Keywords..."
     )
     
@@ -132,6 +131,8 @@ async def scrape_task(base_kw, context, uid, is_auto=False):
     
     leads = []
     new_count = 0
+    
+    # --- CHANGE: Path set to scraped_emails ---
     ref = db.reference('scraped_emails')
     
     keywords = await get_expanded_keywords(base_kw)
@@ -143,7 +144,7 @@ async def scrape_task(base_kw, context, uid, is_auto=False):
         for kw_idx, kw in enumerate(keywords):
             if context.user_data.get('stop_signal'): break
             
-            # Update user every 5 keywords so they know it's working
+            # Update user every 5 keywords
             if kw_idx % 5 == 0:
                 try:
                     await context.bot.edit_message_text(
@@ -164,13 +165,10 @@ async def scrape_task(base_kw, context, uid, is_auto=False):
                         if context.user_data.get('stop_signal'): break
                         
                         app_id = r['appId']
-                        safe_id = app_id.replace('.', '_')
+                        # Firebase keys cannot have '.', replace with '_'
+                        # We use email as key if possible, or AppID? 
+                        # Using AppID is safer for uniqueness, but if you want email based uniqueness:
                         
-                        # Check local duplicates first
-                        if any(l['app_id'] == app_id for l in leads): continue
-                        # Check DB duplicates
-                        if ref.child(safe_id).get(): continue
-
                         try:
                             app = await asyncio.to_thread(app_details, app_id, lang='en', country=country)
                             if not app: continue
@@ -181,6 +179,12 @@ async def scrape_task(base_kw, context, uid, is_auto=False):
                             
                             email = app.get('developerEmail', '').lower().strip()
                             if not await validate_email(email): continue
+                            
+                            # Create a safe key based on email to prevent duplicates across different apps/versions
+                            safe_key = email.replace('.', '_').replace('@', '_at_')
+                            
+                            # Check DB duplicates
+                            if ref.child(safe_key).get(): continue
 
                             data = {
                                 'app_name': app.get('title'),
@@ -193,10 +197,12 @@ async def scrape_task(base_kw, context, uid, is_auto=False):
                                 'date': datetime.now().isoformat()
                             }
                             
-                            ref.child(safe_id).set(data)
+                            # Save using Email as Key (to ensure unique emails in DB)
+                            ref.child(safe_key).set(data)
+                            
                             leads.append(data)
                             new_count += 1
-                            session_stats['total_emails'] += 1
+                            session_stats['total_leads'] += 1
 
                         except: continue
                 except: continue
@@ -211,7 +217,7 @@ async def scrape_task(base_kw, context, uid, is_auto=False):
             output = io.BytesIO(si.getvalue().encode('utf-8'))
             output.name = f"Leads_{base_kw}.csv"
             
-            await context.bot.send_document(uid, output, caption=f"✅ Done! Found {new_count} leads.")
+            await context.bot.send_document(uid, output, caption=f"✅ Done! Found {new_count} leads.\nSaved to: scraped_emails")
         else:
             await context.bot.send_message(uid, "❌ No valid leads found for this search.")
 
@@ -244,7 +250,8 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     text = (
         "🤖 **Play Store Scraper Dashboard**\n\n"
         "🟢 **System Status:** Online\n"
-        "📈 **Session emails:** " + str(session_stats['total_emails']) + "\n"
+        "📈 **Session Leads:** " + str(session_stats['total_leads']) + "\n"
+        "📂 **DB Path:** `scraped_emails`\n"
         "⚙️ **Current Status:** " + session_stats['status'] + "\n\n"
         "👇 Select an action:"
     )
@@ -263,7 +270,7 @@ async def cb_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if q.data == 'check_health':
         fb_status = "✅ Connected" if fs_client else "❌ Failed"
         tasks = len(active_tasks)
-        await q.message.reply_text(f"🩺 **System Diagnosis:**\n\n• Firebase: {fb_status}\n• Active Tasks: {tasks}\n• Groq Keys: {len(GROQ_KEYS)}\n• Memory: OK", parse_mode='Markdown')
+        await q.message.reply_text(f"🩺 **System Diagnosis:**\n\n• Firebase: {fb_status}\n• DB Path: scraped_emails\n• Active Tasks: {tasks}\n• Memory: OK", parse_mode='Markdown')
 
     elif q.data == 'stats':
         dur = "0m"
@@ -317,12 +324,9 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     
-    # Robust Deployment Logic
     if RENDER_URL:
-        # Use Webhook for Render
         app.run_webhook(listen="0.0.0.0", port=PORT, url_path=TOKEN, webhook_url=f"{RENDER_URL}/{TOKEN}")
     else:
-        # Fallback to Polling (Good for testing)
         print("⚠️ No RENDER_URL found. Using Polling...")
         app.run_polling()
 
