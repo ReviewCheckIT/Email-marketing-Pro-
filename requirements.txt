@@ -6,3 +6,5 @@ httpx
 asyncio
 aiohttp
 python-dotenv==1.0.1
+dnspython==2.6.1
+ujson==5.9.0
