@@ -244,7 +244,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     text = (
         "🤖 **Play Store Scraper Dashboard**\n\n"
         "🟢 **System Status:** Online\n"
-        "📈 **Session Leads:** " + str(session_stats['total_leads']) + "\n"
+        "📈 **Session emails:** " + str(session_stats['total_emails']) + "\n"
         "⚙️ **Current Status:** " + session_stats['status'] + "\n\n"
         "👇 Select an action:"
     )
