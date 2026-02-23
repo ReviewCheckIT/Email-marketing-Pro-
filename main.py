@@ -13,7 +13,7 @@ from datetime import datetime
 
 # Third-party imports
 import dns.resolver
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
 from google_play_scraper import search as play_search, app as app_details
 
@@ -308,10 +308,142 @@ async def execute_auto_search(context, uid, user_name):
         await send_log(context, uid, f"Auto Mode Error: {e}")
         session_stats['status'] = "Idle"
 
-# --- Handlers ---
+# --- Action Functions (used by both command handlers and callback handler) ---
 
-async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    uid = str(u.effective_user.id)
+async def health_action(update: Update, context: ContextTypes.DEFAULT_TYPE, is_callback=False):
+    """Health check logic"""
+    uid = str(update.effective_user.id)
+    try:
+        db.reference('health_check').set({"status": "ok", "time": str(datetime.now())})
+        fb_status = "✅ Connected & Writeable"
+    except Exception as e:
+        fb_status = f"❌ Error: {str(e)[:50]}"
+    
+    tasks = len(active_tasks)
+    msg = f"🩺 **System Diagnosis:**\n\n• Firebase: {fb_status}\n• DB Path: scraped_emails\n• Active Tasks: {tasks}\n• Groq Keys: {len(GROQ_KEYS)}"
+    
+    if is_callback:
+        await update.callback_query.message.reply_text(msg, parse_mode='Markdown')
+    else:
+        await update.message.reply_text(msg, parse_mode='Markdown')
+
+async def download_action(update: Update, context: ContextTypes.DEFAULT_TYPE, is_callback=False):
+    """Download all database logic"""
+    uid = str(update.effective_user.id)
+    if is_callback:
+        await update.callback_query.message.reply_text("⏳ **Fetching all data from Database...**\nDepending on size, this may take a few seconds.")
+    else:
+        await update.message.reply_text("⏳ **Fetching all data from Database...**\nDepending on size, this may take a few seconds.")
+    
+    try:
+        ref = db.reference('scraped_emails')
+        all_data = await asyncio.to_thread(ref.get)
+        
+        if all_data:
+            si = io.StringIO()
+            cw = csv.writer(si)
+            cw.writerow([
+                'App Name', 'Email', 'Phone', 'Website', 'Installs', 'Country', 'Keyword', 'Date',
+                'Score', 'Total Ratings', '1-Star', '2-Star', '3-Star', '4-Star', '5-Star'
+            ])
+            
+            count = 0
+            for key, v in all_data.items():
+                if isinstance(v, dict):
+                    cw.writerow([
+                        v.get('app_name', 'N/A'), 
+                        v.get('email', 'N/A'), 
+                        v.get('phone', 'N/A'),
+                        v.get('website', 'N/A'), 
+                        v.get('installs', 'N/A'), 
+                        v.get('country', 'N/A'), 
+                        v.get('keyword', 'N/A'),
+                        v.get('date', 'N/A'),
+                        v.get('score', 0.0),
+                        v.get('total_ratings', 0),
+                        v.get('ratings_1', 0),
+                        v.get('ratings_2', 0),
+                        v.get('ratings_3', 0),
+                        v.get('ratings_4', 0),
+                        v.get('ratings_5', 0)
+                    ])
+                    count += 1
+            
+            output = io.BytesIO(si.getvalue().encode('utf-8'))
+            output.name = f"Full_Database_{datetime.now().strftime('%Y%m%d')}.csv"
+            
+            await context.bot.send_document(uid, output, caption=f"✅ **Database Downloaded**\n\n📂 Total Records: {count}")
+        else:
+            await context.bot.send_message(uid, "⚠️ Database is empty.")
+    except Exception as e:
+        logger.error(f"Download Error: {e}")
+        await context.bot.send_message(uid, f"❌ Error downloading: {e}")
+
+async def stats_action(update: Update, context: ContextTypes.DEFAULT_TYPE, is_callback=False):
+    """Live statistics logic"""
+    dur = "0m"
+    if session_stats['start_time']:
+        delta = datetime.now() - session_stats['start_time']
+        dur = f"{delta.seconds // 60}m {delta.seconds % 60}s"
+        
+    status_info = session_stats['status']
+    if session_stats['active_by_name'] and session_stats['status'] != 'Idle':
+        status_info += f" (Run by: {session_stats['active_by_name']})"
+
+    msg = (
+        f"📊 **Live Statistics**\n\n"
+        f"📥 Leads Collected: `{session_stats['total_leads']}`\n"
+        f"⏱ Runtime: `{dur}`\n"
+        f"⚙️ Status: `{status_info}`"
+    )
+    
+    if is_callback:
+        await update.callback_query.message.reply_text(msg, parse_mode='Markdown')
+    else:
+        await update.message.reply_text(msg, parse_mode='Markdown')
+
+async def auto_action(update: Update, context: ContextTypes.DEFAULT_TYPE, is_callback=False):
+    """Auto mode logic"""
+    uid = str(update.effective_user.id)
+    user_name = update.effective_user.first_name
+    
+    # Check busy status
+    if session_stats['status'] != "Idle" and session_stats['active_by_id'] != uid:
+        msg = f"⚠️ **Busy!**\nAdmin **{session_stats['active_by_name']}** is currently running a task.\nPlease wait."
+        if is_callback:
+            await update.callback_query.message.reply_text(msg)
+        else:
+            await update.message.reply_text(msg)
+        return
+
+    context.user_data['stop_signal'] = False
+    if is_callback:
+        await update.callback_query.edit_message_text(f"🔄 Initializing Auto Mode (User: {user_name})...")
+    else:
+        await update.message.reply_text(f"🔄 Initializing Auto Mode (User: {user_name})...")
+    await execute_auto_search(context, uid, user_name)
+
+async def refresh_action(update: Update, context: ContextTypes.DEFAULT_TYPE, is_callback=False):
+    """Refresh bot logic"""
+    uid = str(update.effective_user.id)
+    context.user_data.clear()
+    session_stats['total_leads'] = 0
+    session_stats['status'] = "Idle"
+    session_stats['active_by_id'] = None
+    session_stats['active_by_name'] = None
+    if uid in active_tasks:
+        active_tasks[uid].cancel()
+    
+    msg = "♻️ Bot Refreshed."
+    if is_callback:
+        await update.callback_query.message.reply_text(msg)
+    else:
+        await update.message.reply_text(msg)
+
+# --- Command Handlers ---
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id)
     if not is_owner(uid): return
     
     status_msg = session_stats['status']
@@ -332,126 +464,74 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🤖 Auto Mode", callback_data='auto_s'), InlineKeyboardButton("♻️ Reset Bot", callback_data='refresh_bot')],
         [InlineKeyboardButton("📊 Live Stats", callback_data='stats')]
     ]
-    await u.message.reply_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(btns))
+    await update.message.reply_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(btns))
 
-async def cb_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    q = u.callback_query
-    uid = str(u.effective_user.id)
-    user_name = u.effective_user.first_name
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id)
+    if not is_owner(uid): return
+    await stats_action(update, context, is_callback=False)
+
+async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id)
+    if not is_owner(uid): return
+    await health_action(update, context, is_callback=False)
+
+async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id)
+    if not is_owner(uid): return
+    await download_action(update, context, is_callback=False)
+
+async def auto_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id)
+    if not is_owner(uid): return
+    await auto_action(update, context, is_callback=False)
+
+async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id)
+    if not is_owner(uid): return
+    await refresh_action(update, context, is_callback=False)
+
+# --- Callback Query Handler ---
+async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    uid = str(update.effective_user.id)
+    user_name = update.effective_user.first_name
     await q.answer()
     
     if not is_owner(uid): return
 
     if q.data == 'check_health':
-        try:
-            db.reference('health_check').set({"status": "ok", "time": str(datetime.now())})
-            fb_status = "✅ Connected & Writeable"
-        except Exception as e:
-            fb_status = f"❌ Error: {str(e)[:50]}"
-        
-        tasks = len(active_tasks)
-        await q.message.reply_text(f"🩺 **System Diagnosis:**\n\n• Firebase: {fb_status}\n• DB Path: scraped_emails\n• Active Tasks: {tasks}\n• Groq Keys: {len(GROQ_KEYS)}", parse_mode='Markdown')
-
+        await health_action(update, context, is_callback=True)
     elif q.data == 'dl_all':
-        await q.message.reply_text("⏳ **Fetching all data from Database...**\nDepending on size, this may take a few seconds.")
-        try:
-            ref = db.reference('scraped_emails')
-            all_data = await asyncio.to_thread(ref.get)
-            
-            if all_data:
-                si = io.StringIO()
-                cw = csv.writer(si)
-                # Extended header with rating details
-                cw.writerow([
-                    'App Name', 'Email', 'Phone', 'Website', 'Installs', 'Country', 'Keyword', 'Date',
-                    'Score', 'Total Ratings', '1-Star', '2-Star', '3-Star', '4-Star', '5-Star'
-                ])
-                
-                count = 0
-                for key, v in all_data.items():
-                    if isinstance(v, dict):
-                        cw.writerow([
-                            v.get('app_name', 'N/A'), 
-                            v.get('email', 'N/A'), 
-                            v.get('phone', 'N/A'),
-                            v.get('website', 'N/A'), 
-                            v.get('installs', 'N/A'), 
-                            v.get('country', 'N/A'), 
-                            v.get('keyword', 'N/A'),
-                            v.get('date', 'N/A'),
-                            v.get('score', 0.0),
-                            v.get('total_ratings', 0),
-                            v.get('ratings_1', 0),
-                            v.get('ratings_2', 0),
-                            v.get('ratings_3', 0),
-                            v.get('ratings_4', 0),
-                            v.get('ratings_5', 0)
-                        ])
-                        count += 1
-                
-                output = io.BytesIO(si.getvalue().encode('utf-8'))
-                output.name = f"Full_Database_{datetime.now().strftime('%Y%m%d')}.csv"
-                
-                await c.bot.send_document(uid, output, caption=f"✅ **Database Downloaded**\n\n📂 Total Records: {count}")
-            else:
-                await q.message.reply_text("⚠️ Database is empty.")
-        except Exception as e:
-            logger.error(f"Download Error: {e}")
-            await q.message.reply_text(f"❌ Error downloading: {e}")
-
+        await download_action(update, context, is_callback=True)
     elif q.data == 'stats':
-        dur = "0m"
-        if session_stats['start_time']:
-            delta = datetime.now() - session_stats['start_time']
-            dur = f"{delta.seconds // 60}m {delta.seconds % 60}s"
-            
-        status_info = session_stats['status']
-        if session_stats['active_by_name'] and session_stats['status'] != 'Idle':
-            status_info += f" (Run by: {session_stats['active_by_name']})"
-
-        msg = (
-            f"📊 **Live Statistics**\n\n"
-            f"📥 Leads Collected: `{session_stats['total_leads']}`\n"
-            f"⏱ Runtime: `{dur}`\n"
-            f"⚙️ Status: `{status_info}`"
-        )
-        await q.message.reply_text(msg, parse_mode='Markdown')
-
+        await stats_action(update, context, is_callback=True)
     elif q.data == 'auto_s':
+        # Special case: auto mode uses its own logic with edit_message
         # Check busy status
         if session_stats['status'] != "Idle" and session_stats['active_by_id'] != uid:
-             await q.message.reply_text(f"⚠️ **Busy!**\nAdmin **{session_stats['active_by_name']}** is currently running a task.\nPlease wait.")
-             return
-
-        c.user_data['stop_signal'] = False
+            await q.message.reply_text(f"⚠️ **Busy!**\nAdmin **{session_stats['active_by_name']}** is currently running a task.\nPlease wait.")
+            return
+        context.user_data['stop_signal'] = False
         await q.edit_message_text(f"🔄 Initializing Auto Mode (User: {user_name})...")
-        await execute_auto_search(c, uid, user_name)
-
+        await execute_auto_search(context, uid, user_name)
+    elif q.data == 'refresh_bot':
+        await refresh_action(update, context, is_callback=True)
     elif q.data == 'stop_loop':
-        # Only allow the person who started it to stop it, OR force stop if needed
+        # Stop logic remains here as it's specific to running task
         if session_stats['active_by_id'] and session_stats['active_by_id'] != uid:
             await q.message.reply_text(f"⚠️ This task was started by **{session_stats['active_by_name']}**. Only they can stop it.")
             return
-
-        c.user_data['stop_signal'] = True
+        context.user_data['stop_signal'] = True
         if uid in active_tasks:
             active_tasks[uid].cancel()
-        
         session_stats['status'] = "Stopped"
         session_stats['active_by_id'] = None
         await q.message.reply_text("🛑 Process Forcefully Stopped.")
 
-    elif q.data == 'refresh_bot':
-        c.user_data.clear()
-        session_stats['total_leads'] = 0
-        session_stats['status'] = "Idle"
-        session_stats['active_by_id'] = None
-        session_stats['active_by_name'] = None
-        if uid in active_tasks: active_tasks[uid].cancel()
-        await q.message.reply_text("♻️ Bot Refreshed.")
-
-async def message_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    uid = str(u.effective_user.id)
+# --- Message Handler (for keyword input) ---
+async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id)
     if not is_owner(uid): return
     
     # BUSY CHECK LOGIC
@@ -459,7 +539,7 @@ async def message_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
         # If the user is NOT the one who started the task
         if session_stats['active_by_id'] != uid:
             worker_name = session_stats['active_by_name']
-            await u.message.reply_text(
+            await update.message.reply_text(
                 f"⚠️ **System Busy!**\n\n"
                 f"👤 Admin **{worker_name}** is currently running a task.\n"
                 f"⚙️ Status: {session_stats['status']}\n\n"
@@ -467,18 +547,47 @@ async def message_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
             )
             return
         else:
-             await u.message.reply_text(f"⚠️ You already have a task running! Press STOP first.")
+             await update.message.reply_text(f"⚠️ You already have a task running! Press STOP first.")
              return
 
-    user_name = u.effective_user.first_name
-    active_tasks[uid] = asyncio.create_task(scrape_task(u.message.text, c, uid, user_name))
+    user_name = update.effective_user.first_name
+    active_tasks[uid] = asyncio.create_task(scrape_task(update.message.text, context, uid, user_name))
+
+# --- Function to set persistent menu ---
+async def setup_persistent_menu(app: Application):
+    """Set the bot's command list (persistent menu)."""
+    commands = [
+        BotCommand("start", "ড্যাশবোর্ড দেখুন"),
+        BotCommand("stats", "লাইভ পরিসংখ্যান"),
+        BotCommand("health", "সিস্টেম হেলথ চেক"),
+        BotCommand("download", "সম্পূর্ণ ডাটাবেস ডাউনলোড"),
+        BotCommand("auto", "অটো মোড চালু করুন"),
+        BotCommand("refresh", "বট রিফ্রেশ করুন"),
+    ]
+    await app.bot.set_my_commands(commands)
+    logger.info("✅ Persistent menu set up with commands.")
 
 # --- Main ---
 def main():
-    if not TOKEN: sys.exit("Missing TOKEN")
+    if not TOKEN:
+        sys.exit("Missing TOKEN")
     
     app = Application.builder().token(TOKEN).build()
+    
+    # Setup persistent menu (async call)
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(setup_persistent_menu(app))
+    
+    # Add command handlers
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(CommandHandler("health", health_command))
+    app.add_handler(CommandHandler("download", download_command))
+    app.add_handler(CommandHandler("auto", auto_command))
+    app.add_handler(CommandHandler("refresh", refresh_command))
+    
+    # Add callback query handler and message handler
     app.add_handler(CallbackQueryHandler(cb_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     
