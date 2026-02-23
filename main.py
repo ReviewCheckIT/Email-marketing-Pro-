@@ -131,12 +131,12 @@ async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
     session_stats['active_by_id'] = str(uid)
     session_stats['active_by_name'] = user_name
     
-    # Updated status message to include low-rating filter
+    # Updated status message to include rating details
     status_text = (
         f"🚀 **Search Started by {user_name}**\n"
         f"🔑 Keyword: `{base_kw}`\n"
         f"🎯 Filter: <10k Installs & Low Ratings (1-2⭐)\n"
-        f"📞 Features: Email + Phone Extraction\n"
+        f"📞 Features: Email + Phone Extraction + Rating Details\n"
         f"💾 Saving to: `scraped_emails`\n"
         f"⏳ Generating Keywords..."
     )
@@ -186,7 +186,7 @@ async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
                             installs = parse_installs(app.get('installs', '0'))
                             if installs >= 10000: continue
 
-                            # --- NEW: Filter by low ratings (1-star or 2-star) ---
+                            # Filter by low ratings (1-star or 2-star)
                             histogram = app.get('histogram')
                             if not histogram or len(histogram) < 5:
                                 continue  # No ratings at all -> skip
@@ -198,6 +198,15 @@ async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
                             
                             # Extract Phone Number
                             phone = app.get('developerPhone', 'N/A')
+                            
+                            # Rating details
+                            score = app.get('score', 0.0)
+                            ratings_1 = histogram[0] if len(histogram) > 0 else 0
+                            ratings_2 = histogram[1] if len(histogram) > 1 else 0
+                            ratings_3 = histogram[2] if len(histogram) > 2 else 0
+                            ratings_4 = histogram[3] if len(histogram) > 3 else 0
+                            ratings_5 = histogram[4] if len(histogram) > 4 else 0
+                            total_ratings = sum(histogram)
                             
                             safe_key = email.replace('.', '_').replace('@', '_at_')
                             if ref.child(safe_key).get(): continue
@@ -211,7 +220,15 @@ async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
                                 'installs': app.get('installs'),
                                 'country': country,
                                 'keyword': kw,
-                                'date': datetime.now().isoformat()
+                                'date': datetime.now().isoformat(),
+                                # Rating fields
+                                'score': score,
+                                'total_ratings': total_ratings,
+                                'ratings_1': ratings_1,
+                                'ratings_2': ratings_2,
+                                'ratings_3': ratings_3,
+                                'ratings_4': ratings_4,
+                                'ratings_5': ratings_5
                             }
                             
                             ref.child(safe_key).set(data)
@@ -230,9 +247,27 @@ async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
         if leads:
             si = io.StringIO()
             cw = csv.writer(si)
-            cw.writerow(['Name', 'Email', 'Phone', 'Website', 'Installs', 'Country'])
+            # Extended header with rating details
+            cw.writerow([
+                'Name', 'Email', 'Phone', 'Website', 'Installs', 'Country',
+                'Score', 'Total Ratings', '1-Star', '2-Star', '3-Star', '4-Star', '5-Star'
+            ])
             for v in leads: 
-                cw.writerow([v['app_name'], v['email'], v.get('phone', 'N/A'), v['website'], v['installs'], v['country']])
+                cw.writerow([
+                    v['app_name'], 
+                    v['email'], 
+                    v.get('phone', 'N/A'), 
+                    v['website'], 
+                    v['installs'], 
+                    v['country'],
+                    v.get('score', 0.0),
+                    v.get('total_ratings', 0),
+                    v.get('ratings_1', 0),
+                    v.get('ratings_2', 0),
+                    v.get('ratings_3', 0),
+                    v.get('ratings_4', 0),
+                    v.get('ratings_5', 0)
+                ])
             output = io.BytesIO(si.getvalue().encode('utf-8'))
             output.name = f"Leads_{base_kw}.csv"
             
@@ -320,7 +355,11 @@ async def cb_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
             if all_data:
                 si = io.StringIO()
                 cw = csv.writer(si)
-                cw.writerow(['App Name', 'Email', 'Phone', 'Website', 'Installs', 'Country', 'Keyword', 'Date'])
+                # Extended header with rating details
+                cw.writerow([
+                    'App Name', 'Email', 'Phone', 'Website', 'Installs', 'Country', 'Keyword', 'Date',
+                    'Score', 'Total Ratings', '1-Star', '2-Star', '3-Star', '4-Star', '5-Star'
+                ])
                 
                 count = 0
                 for key, v in all_data.items():
@@ -333,7 +372,14 @@ async def cb_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
                             v.get('installs', 'N/A'), 
                             v.get('country', 'N/A'), 
                             v.get('keyword', 'N/A'),
-                            v.get('date', 'N/A')
+                            v.get('date', 'N/A'),
+                            v.get('score', 0.0),
+                            v.get('total_ratings', 0),
+                            v.get('ratings_1', 0),
+                            v.get('ratings_2', 0),
+                            v.get('ratings_3', 0),
+                            v.get('ratings_4', 0),
+                            v.get('ratings_5', 0)
                         ])
                         count += 1
                 
