@@ -131,11 +131,11 @@ async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
     session_stats['active_by_id'] = str(uid)
     session_stats['active_by_name'] = user_name
     
-    # Updated status message to include rating details
+    # Updated status message with score filter
     status_text = (
         f"🚀 **Search Started by {user_name}**\n"
         f"🔑 Keyword: `{base_kw}`\n"
-        f"🎯 Filter: <10k Installs & Low Ratings (1-2⭐)\n"
+        f"🎯 Filter: <10k Installs, Score ≤ 3.0, and at least one 1-2⭐ rating\n"
         f"📞 Features: Email + Phone Extraction + Rating Details\n"
         f"💾 Saving to: `scraped_emails`\n"
         f"⏳ Generating Keywords..."
@@ -186,6 +186,11 @@ async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
                             installs = parse_installs(app.get('installs', '0'))
                             if installs >= 10000: continue
 
+                            # --- NEW: Filter by average score (≤ 3.0) ---
+                            score = app.get('score', 0.0)
+                            if score > 3.0:
+                                continue
+
                             # Filter by low ratings (1-star or 2-star)
                             histogram = app.get('histogram')
                             if not histogram or len(histogram) < 5:
@@ -196,11 +201,12 @@ async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
                             email = app.get('developerEmail', '').lower().strip()
                             if not await validate_email(email): continue
                             
-                            # Extract Phone Number
-                            phone = app.get('developerPhone', 'N/A')
+                            # Extract Phone Number (improved: use fallback if missing or empty)
+                            phone = app.get('developerPhone')
+                            if not phone:
+                                phone = 'N/A'
                             
                             # Rating details
-                            score = app.get('score', 0.0)
                             ratings_1 = histogram[0] if len(histogram) > 0 else 0
                             ratings_2 = histogram[1] if len(histogram) > 1 else 0
                             ratings_3 = histogram[2] if len(histogram) > 2 else 0
