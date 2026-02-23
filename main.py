@@ -131,10 +131,11 @@ async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
     session_stats['active_by_id'] = str(uid)
     session_stats['active_by_name'] = user_name
     
+    # Updated status message to include low-rating filter
     status_text = (
         f"🚀 **Search Started by {user_name}**\n"
         f"🔑 Keyword: `{base_kw}`\n"
-        f"🎯 Filter: <10k Installs\n"
+        f"🎯 Filter: <10k Installs & Low Ratings (1-2⭐)\n"
         f"📞 Features: Email + Phone Extraction\n"
         f"💾 Saving to: `scraped_emails`\n"
         f"⏳ Generating Keywords..."
@@ -184,11 +185,18 @@ async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
 
                             installs = parse_installs(app.get('installs', '0'))
                             if installs >= 10000: continue
+
+                            # --- NEW: Filter by low ratings (1-star or 2-star) ---
+                            histogram = app.get('histogram')
+                            if not histogram or len(histogram) < 5:
+                                continue  # No ratings at all -> skip
+                            if histogram[0] == 0 and histogram[1] == 0:
+                                continue  # No 1-star or 2-star ratings -> skip
                             
                             email = app.get('developerEmail', '').lower().strip()
                             if not await validate_email(email): continue
                             
-                            # --- NEW: Extract Phone Number ---
+                            # Extract Phone Number
                             phone = app.get('developerPhone', 'N/A')
                             
                             safe_key = email.replace('.', '_').replace('@', '_at_')
@@ -198,7 +206,7 @@ async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
                                 'app_name': app.get('title'),
                                 'app_id': app_id,
                                 'email': email,
-                                'phone': phone, # Added phone field
+                                'phone': phone,
                                 'website': app.get('developerWebsite', 'N/A'),
                                 'installs': app.get('installs'),
                                 'country': country,
@@ -222,7 +230,6 @@ async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
         if leads:
             si = io.StringIO()
             cw = csv.writer(si)
-            # Added Phone in Header
             cw.writerow(['Name', 'Email', 'Phone', 'Website', 'Installs', 'Country'])
             for v in leads: 
                 cw.writerow([v['app_name'], v['email'], v.get('phone', 'N/A'), v['website'], v['installs'], v['country']])
@@ -313,7 +320,6 @@ async def cb_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
             if all_data:
                 si = io.StringIO()
                 cw = csv.writer(si)
-                # Added Phone in Header
                 cw.writerow(['App Name', 'Email', 'Phone', 'Website', 'Installs', 'Country', 'Keyword', 'Date'])
                 
                 count = 0
@@ -322,7 +328,7 @@ async def cb_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
                         cw.writerow([
                             v.get('app_name', 'N/A'), 
                             v.get('email', 'N/A'), 
-                            v.get('phone', 'N/A'), # Added Phone
+                            v.get('phone', 'N/A'),
                             v.get('website', 'N/A'), 
                             v.get('installs', 'N/A'), 
                             v.get('country', 'N/A'), 
