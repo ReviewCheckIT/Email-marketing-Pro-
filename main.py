@@ -121,6 +121,39 @@ async def get_expanded_keywords(base_kw):
         except: continue
     return [base_kw]
 
+# --- NEW: Function to load countries from Firebase (or default) ---
+async def load_countries():
+    """Load country list from Firebase config, or return default ['us','uk']"""
+    ref = db.reference('config/countries')
+    saved = await asyncio.to_thread(ref.get)
+    if saved and isinstance(saved, list):
+        return saved
+    return ['us', 'uk']  # default
+
+# --- NEW: Function to delete first N leads ---
+async def delete_n_leads(uid, n, context):
+    """Delete first N leads from scraped_emails path."""
+    ref = db.reference('scraped_emails')
+    try:
+        # Fetch only first N keys using order_by_key and limit_to_first
+        query = ref.order_by_key().limit_to_first(n)
+        snapshot = await asyncio.to_thread(query.get)
+        if not snapshot:
+            return 0, "No leads found to delete."
+        
+        keys = list(snapshot.keys())
+        if not keys:
+            return 0, "No leads found."
+        
+        # Delete each key
+        delete_tasks = [asyncio.to_thread(ref.child(key).delete) for key in keys]
+        await asyncio.gather(*delete_tasks)
+        
+        return len(keys), f"✅ Deleted {len(keys)} lead(s)."
+    except Exception as e:
+        logger.error(f"Delete error: {e}")
+        return 0, f"❌ Error deleting leads: {e}"
+
 # --- Scraper Engine ---
 async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
     context.user_data['stop_signal'] = False
@@ -154,7 +187,8 @@ async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
     keywords = await get_expanded_keywords(base_kw)
     await context.bot.edit_message_text(f"✅ Generated {len(keywords)} keywords. Starting scraper...", chat_id=uid, message_id=status_msg.message_id, reply_markup=markup)
 
-    countries = ['us', 'uk']
+    # --- Load countries from Firebase config (NEW) ---
+    countries = await load_countries()
 
     try:
         for kw_idx, kw in enumerate(keywords):
@@ -186,7 +220,7 @@ async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
                             installs = parse_installs(app.get('installs', '0'))
                             if installs >= 50000: continue
 
-                            # --- NEW: Filter by average score (≤ 3.8) ---
+                            # Filter by average score (≤ 3.8)
                             score = app.get('score', 0.0)
                             if score > 3.8:
                                 continue
@@ -440,6 +474,28 @@ async def refresh_action(update: Update, context: ContextTypes.DEFAULT_TYPE, is_
     else:
         await update.message.reply_text(msg)
 
+# --- NEW: Set Countries action (initiates awaiting input) ---
+async def set_countries_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    context.user_data['awaiting_countries'] = True
+    await q.edit_message_text(
+        "🌍 **Set Country Codes**\n\n"
+        "Please send the country codes you want to use, separated by commas.\n"
+        "Example: `us,gb,in,ca`\n\n"
+        "(You can use any two‑letter ISO country codes supported by Google Play.)"
+    )
+
+# --- NEW: Delete N Leads action (initiates awaiting input) ---
+async def delete_leads_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    context.user_data['awaiting_delete_count'] = True
+    await q.edit_message_text(
+        "🗑 **Delete N Leads**\n\n"
+        "How many leads do you want to delete? Send a number (e.g., 100)."
+    )
+
 # --- Command Handlers ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -459,10 +515,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👇 Select an action:"
     )
     
+    # NEW: Added two new buttons at the end
     btns = [
         [InlineKeyboardButton("✅ Health Check", callback_data='check_health'), InlineKeyboardButton("📥 Download All DB", callback_data='dl_all')],
         [InlineKeyboardButton("🤖 Auto Mode", callback_data='auto_s'), InlineKeyboardButton("♻️ Reset Bot", callback_data='refresh_bot')],
-        [InlineKeyboardButton("📊 Live Stats", callback_data='stats')]
+        [InlineKeyboardButton("📊 Live Stats", callback_data='stats')],
+        [InlineKeyboardButton("🌍 Set Countries", callback_data='set_countries'), InlineKeyboardButton("🗑 Delete N Leads", callback_data='delete_leads')]
     ]
     await update.message.reply_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(btns))
 
@@ -528,13 +586,64 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session_stats['status'] = "Stopped"
         session_stats['active_by_id'] = None
         await q.message.reply_text("🛑 Process Forcefully Stopped.")
+    # NEW: Handle new callback data
+    elif q.data == 'set_countries':
+        await set_countries_action(update, context)
+    elif q.data == 'delete_leads':
+        await delete_leads_action(update, context)
 
-# --- Message Handler (for keyword input) ---
+# --- Message Handler (for keyword input and awaiting inputs) ---
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     if not is_owner(uid): return
-    
-    # BUSY CHECK LOGIC
+
+    # --- NEW: Check for awaiting countries input ---
+    if context.user_data.get('awaiting_countries'):
+        text = update.message.text.strip()
+        # Split by comma and clean
+        raw_codes = [code.strip().lower() for code in text.split(',') if code.strip()]
+        # Basic validation: allow any two-letter codes (user responsibility)
+        valid_codes = [code for code in raw_codes if re.match(r'^[a-z]{2}$', code)]
+        if not valid_codes:
+            await update.message.reply_text("❌ No valid country codes found. Please send codes like: `us,gb,in`", parse_mode='Markdown')
+            return
+        
+        # Save to Firebase
+        countries_ref = db.reference('config/countries')
+        await asyncio.to_thread(countries_ref.set, valid_codes)
+        
+        # Clear awaiting flag
+        del context.user_data['awaiting_countries']
+        
+        await update.message.reply_text(f"✅ Country codes saved: {', '.join(valid_codes).upper()}\nThey will be used for future scraping.")
+        return
+
+    # --- NEW: Check for awaiting delete count input ---
+    if context.user_data.get('awaiting_delete_count'):
+        text = update.message.text.strip()
+        try:
+            n = int(text)
+            if n <= 0:
+                await update.message.reply_text("❌ Please send a positive number.")
+                return
+        except ValueError:
+            await update.message.reply_text("❌ Please send a valid number (e.g., 100).")
+            return
+        
+        # Delete N leads
+        status_msg = await update.message.reply_text(f"🗑 Deleting {n} leads... Please wait.")
+        deleted, result_msg = await delete_n_leads(uid, n, context)
+        await status_msg.edit_text(result_msg)
+        
+        # Update session_stats total_leads? Actually session_stats tracks current session, not total DB.
+        # We don't modify session_stats here; it's just for live session.
+        # Optionally we could fetch new total but not needed.
+        
+        # Clear awaiting flag
+        del context.user_data['awaiting_delete_count']
+        return
+
+    # --- BUSY CHECK LOGIC (existing) ---
     if session_stats['status'] != "Idle" and not "Stopped" in session_stats['status']:
         # If the user is NOT the one who started the task
         if session_stats['active_by_id'] != uid:
@@ -550,6 +659,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
              await update.message.reply_text(f"⚠️ You already have a task running! Press STOP first.")
              return
 
+    # Otherwise treat as keyword input for scraping
     user_name = update.effective_user.first_name
     active_tasks[uid] = asyncio.create_task(scrape_task(update.message.text, context, uid, user_name))
 
