@@ -135,7 +135,7 @@ async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
     status_text = (
         f"🚀 **Search Started by {user_name}**\n"
         f"🔑 Keyword: `{base_kw}`\n"
-        f"🎯 Filter: <10k Installs, Score ≤ 3.0, and at least one 1-2⭐ rating\n"
+        f"🎯 Filter: <50k Installs, Score ≤ 3.8, and at least one 1-2⭐ rating\n"
         f"📞 Features: Email + Phone Extraction + Rating Details\n"
         f"💾 Saving to: `scraped_emails`\n"
         f"⏳ Generating Keywords..."
@@ -154,7 +154,7 @@ async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
     keywords = await get_expanded_keywords(base_kw)
     await context.bot.edit_message_text(f"✅ Generated {len(keywords)} keywords. Starting scraper...", chat_id=uid, message_id=status_msg.message_id, reply_markup=markup)
 
-    countries = ['us', 'gb', 'ca', 'au', 'in']
+    countries = ['us', 'gb', 'ca', 'au', 'in', 'de', 'fr', 'sg', 'ae', 'nz']
 
     try:
         for kw_idx, kw in enumerate(keywords):
@@ -184,11 +184,11 @@ async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
                             if not app: continue
 
                             installs = parse_installs(app.get('installs', '0'))
-                            if installs >= 10000: continue
+                            if installs >= 50000: continue
 
-                            # --- NEW: Filter by average score (≤ 3.0) ---
+                            # --- NEW: Filter by average score (≤ 3.8) ---
                             score = app.get('score', 0.0)
-                            if score > 3.0:
+                            if score > 3.8:
                                 continue
 
                             # Filter by low ratings (1-star or 2-star)
