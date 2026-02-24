@@ -106,7 +106,7 @@ async def get_expanded_keywords(base_kw):
     url = "https://api.groq.com/openai/v1/chat/completions"
     payload = {
         "model": "llama-3.3-70b-versatile",
-        "messages": [{"role": "user", "content": f"Generate 50 Play Store search terms for '{base_kw}'. CSV format only."}]
+        "messages": [{"role": "user", "content": f"Generate 100 Play Store search terms for '{base_kw}'. CSV format only."}]
     }
 
     for i, api_key in enumerate(GROQ_KEYS):
@@ -172,7 +172,7 @@ async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
                 await asyncio.sleep(0.5)
 
                 try:
-                    results = await asyncio.to_thread(play_search, kw, n_hits=30, lang='en', country=country)
+                    results = await asyncio.to_thread(play_search, kw, n_hits=100, lang='en', country=country)
                     if not results: continue
 
                     for r in results:
