@@ -154,7 +154,7 @@ async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
     keywords = await get_expanded_keywords(base_kw)
     await context.bot.edit_message_text(f"✅ Generated {len(keywords)} keywords. Starting scraper...", chat_id=uid, message_id=status_msg.message_id, reply_markup=markup)
 
-    countries = ['us', 'gb', 'ca', 'au', 'in', 'de', 'fr', 'sg', 'ae', 'nz']
+    countries = ['us', 'gb', 'ca', 'au', 'de', 'fr', 'sg', 'ae', 'nz']
 
     try:
         for kw_idx, kw in enumerate(keywords):
