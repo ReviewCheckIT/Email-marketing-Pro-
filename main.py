@@ -34,7 +34,7 @@ TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 # Multiple Admin Setup: Split IDs by comma
 OWNER_IDS_ENV = os.environ.get('BOT_OWNER_ID', '')
 # Example env: "123456,789012,345678"
-OWNER_IDS = [str(oid).strip() for oid in OWNER_IDS_ENV.split(',') if oid.strip()]
+OWNER_IDS =[str(oid).strip() for oid in OWNER_IDS_ENV.split(',') if oid.strip()]
 
 FB_JSON = os.environ.get('FIREBASE_CREDENTIALS_JSON')
 FB_URL = os.environ.get('FIREBASE_DATABASE_URL')
@@ -43,7 +43,7 @@ PORT = int(os.environ.get('PORT', '8080'))
 
 # Groq Keys
 KEY_ENV = os.environ.get('GROQ_API_KEY', '')
-GROQ_KEYS = [k.strip() for k in KEY_ENV.split(',') if k.strip()]
+GROQ_KEYS =[k.strip() for k in KEY_ENV.split(',') if k.strip()]
 
 # Global State
 active_tasks = {}
@@ -106,7 +106,7 @@ async def get_expanded_keywords(base_kw):
     url = "https://api.groq.com/openai/v1/chat/completions"
     payload = {
         "model": "llama-3.3-70b-versatile",
-        "messages": [{"role": "user", "content": f"Generate 100 Play Store search terms for '{base_kw}'. CSV format only."}]
+        "messages":[{"role": "user", "content": f"Generate 100 Play Store search terms for '{base_kw}'. CSV format only."}]
     }
 
     for i, api_key in enumerate(GROQ_KEYS):
@@ -117,7 +117,7 @@ async def get_expanded_keywords(base_kw):
                     if resp.status == 200:
                         data = await resp.json()
                         res = data['choices'][0]['message']['content']
-                        return [k.strip() for k in res.split(',') if k.strip()][:50]
+                        return[k.strip() for k in res.split(',') if k.strip()][:50]
         except: continue
     return [base_kw]
 
@@ -174,13 +174,12 @@ async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
         f"⏳ Generating Keywords..."
     )
     
-    markup = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 Live Stats", callback_data='stats'), InlineKeyboardButton("🛑 STOP", callback_data='stop_loop')]
+    markup = InlineKeyboardMarkup([[InlineKeyboardButton("📊 Live Stats", callback_data='stats'), InlineKeyboardButton("🛑 STOP", callback_data='stop_loop')]
     ])
     
     status_msg = await context.bot.send_message(uid, status_text, parse_mode='Markdown', reply_markup=markup)
     
-    leads = []
+    leads =[]
     new_count = 0
     ref = db.reference('scraped_emails')
     
@@ -254,6 +253,7 @@ async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
                             data = {
                                 'app_name': app.get('title'),
                                 'app_id': app_id,
+                                'icon': app.get('icon', ''), # 🌟 NEW: App Icon URL is saved here
                                 'email': email,
                                 'phone': phone,
                                 'website': app.get('developerWebsite', 'N/A'),
@@ -287,14 +287,15 @@ async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
         if leads:
             si = io.StringIO()
             cw = csv.writer(si)
-            # Extended header with rating details
+            # Extended header with rating details and Icon URL
             cw.writerow([
-                'Name', 'Email', 'Phone', 'Website', 'Installs', 'Country',
+                'Name', 'Icon URL', 'Email', 'Phone', 'Website', 'Installs', 'Country',
                 'Score', 'Total Ratings', '1-Star', '2-Star', '3-Star', '4-Star', '5-Star'
             ])
             for v in leads: 
                 cw.writerow([
                     v['app_name'], 
+                    v.get('icon', 'N/A'), # 🌟 NEW
                     v['email'], 
                     v.get('phone', 'N/A'), 
                     v['website'], 
@@ -377,7 +378,7 @@ async def download_action(update: Update, context: ContextTypes.DEFAULT_TYPE, is
             si = io.StringIO()
             cw = csv.writer(si)
             cw.writerow([
-                'App Name', 'Email', 'Phone', 'Website', 'Installs', 'Country', 'Keyword', 'Date',
+                'App Name', 'Icon URL', 'Email', 'Phone', 'Website', 'Installs', 'Country', 'Keyword', 'Date',
                 'Score', 'Total Ratings', '1-Star', '2-Star', '3-Star', '4-Star', '5-Star'
             ])
             
@@ -386,6 +387,7 @@ async def download_action(update: Update, context: ContextTypes.DEFAULT_TYPE, is
                 if isinstance(v, dict):
                     cw.writerow([
                         v.get('app_name', 'N/A'), 
+                        v.get('icon', 'N/A'), # 🌟 NEW
                         v.get('email', 'N/A'), 
                         v.get('phone', 'N/A'),
                         v.get('website', 'N/A'), 
@@ -516,11 +518,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     
     # NEW: Added two new buttons at the end
-    btns = [
-        [InlineKeyboardButton("✅ Health Check", callback_data='check_health'), InlineKeyboardButton("📥 Download All DB", callback_data='dl_all')],
-        [InlineKeyboardButton("🤖 Auto Mode", callback_data='auto_s'), InlineKeyboardButton("♻️ Reset Bot", callback_data='refresh_bot')],
-        [InlineKeyboardButton("📊 Live Stats", callback_data='stats')],
-        [InlineKeyboardButton("🌍 Set Countries", callback_data='set_countries'), InlineKeyboardButton("🗑 Delete N Leads", callback_data='delete_leads')]
+    btns = [[InlineKeyboardButton("✅ Health Check", callback_data='check_health'), InlineKeyboardButton("📥 Download All DB", callback_data='dl_all')],[InlineKeyboardButton("🤖 Auto Mode", callback_data='auto_s'), InlineKeyboardButton("♻️ Reset Bot", callback_data='refresh_bot')],
+        [InlineKeyboardButton("📊 Live Stats", callback_data='stats')],[InlineKeyboardButton("🌍 Set Countries", callback_data='set_countries'), InlineKeyboardButton("🗑 Delete N Leads", callback_data='delete_leads')]
     ]
     await update.message.reply_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(btns))
 
@@ -603,7 +602,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Split by comma and clean
         raw_codes = [code.strip().lower() for code in text.split(',') if code.strip()]
         # Basic validation: allow any two-letter codes (user responsibility)
-        valid_codes = [code for code in raw_codes if re.match(r'^[a-z]{2}$', code)]
+        valid_codes =[code for code in raw_codes if re.match(r'^[a-z]{2}$', code)]
         if not valid_codes:
             await update.message.reply_text("❌ No valid country codes found. Please send codes like: `us,gb,in`", parse_mode='Markdown')
             return
@@ -666,7 +665,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- Function to set persistent menu ---
 async def setup_persistent_menu(app: Application):
     """Set the bot's command list (persistent menu)."""
-    commands = [
+    commands =[
         BotCommand("start", "ড্যাশবোর্ড দেখুন"),
         BotCommand("stats", "লাইভ পরিসংখ্যান"),
         BotCommand("health", "সিস্টেম হেলথ চেক"),
