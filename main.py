@@ -33,8 +33,7 @@ TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 
 # Multiple Admin Setup: Split IDs by comma
 OWNER_IDS_ENV = os.environ.get('BOT_OWNER_ID', '')
-# Example env: "123456,789012,345678"
-OWNER_IDS =[str(oid).strip() for oid in OWNER_IDS_ENV.split(',') if oid.strip()]
+OWNER_IDS = [str(oid).strip() for oid in OWNER_IDS_ENV.split(',') if oid.strip()]
 
 FB_JSON = os.environ.get('FIREBASE_CREDENTIALS_JSON')
 FB_URL = os.environ.get('FIREBASE_DATABASE_URL')
@@ -47,7 +46,6 @@ GROQ_KEYS =[k.strip() for k in KEY_ENV.split(',') if k.strip()]
 
 # Global State
 active_tasks = {}
-# 'active_by_name' stores the name of the admin currently running the task
 session_stats = {
     'total_leads': 0, 
     'start_time': None, 
@@ -72,9 +70,7 @@ except Exception as e:
     fs_client = None
 
 # --- Helper Functions ---
-
 def is_owner(uid):
-    """Check if user is one of the admins"""
     return str(uid) in OWNER_IDS
 
 def parse_installs(install_str):
@@ -85,7 +81,6 @@ def parse_installs(install_str):
     except: return 0
 
 async def validate_email(email):
-    """Email validation with DNS check"""
     if not email: return False
     if not re.match(r"[^@]+@[^@]+\.[^@]+", email): return False
     domain = email.split('@')[-1]
@@ -101,7 +96,7 @@ async def send_log(context, uid, message):
 
 # --- Groq Logic ---
 async def get_expanded_keywords(base_kw):
-    if not GROQ_KEYS: return[base_kw]
+    if not GROQ_KEYS: return [base_kw]
     
     url = "https://api.groq.com/openai/v1/chat/completions"
     payload = {
@@ -119,20 +114,18 @@ async def get_expanded_keywords(base_kw):
                         res = data['choices'][0]['message']['content']
                         return[k.strip() for k in res.split(',') if k.strip()][:50]
         except: continue
-    return[base_kw]
+    return [base_kw]
 
-# --- Function to load countries from Firebase ---
+# --- Load countries from Firebase ---
 async def load_countries():
-    """Load country list from Firebase config, or return default ['us','uk']"""
     ref = db.reference('config/countries')
     saved = await asyncio.to_thread(ref.get)
     if saved and isinstance(saved, list):
         return saved
-    return ['us', 'uk']  # default
+    return ['us', 'uk']
 
-# --- Function to delete first N leads ---
+# --- Delete first N leads ---
 async def delete_n_leads(uid, n, context):
-    """Delete first N leads from scraped_emails path."""
     ref = db.reference('scraped_emails')
     try:
         query = ref.order_by_key().limit_to_first(n)
@@ -154,7 +147,6 @@ async def delete_n_leads(uid, n, context):
 
 # --- NEW: Single App Scraper Engine (By ID or Name) ---
 async def scrape_single_app(query_text, search_type, context, uid, user_name):
-    """Scrapes a specific app by ID or exact Name and saves to DB without strict filtering"""
     session_stats['status'] = f"Running Single: {query_text}"
     session_stats['start_time'] = datetime.now()
     session_stats['active_by_id'] = str(uid)
@@ -172,7 +164,6 @@ async def scrape_single_app(query_text, search_type, context, uid, user_name):
         elif search_type == 'name':
             results = await asyncio.to_thread(play_search, query_text, n_hits=10, lang='en', country=country)
             if results:
-                # Try to find exact match, or take the first one
                 target_id = results[0]['appId']
                 for r in results:
                     if r['title'].lower() == query_text.lower():
@@ -191,12 +182,11 @@ async def scrape_single_app(query_text, search_type, context, uid, user_name):
         session_stats['active_by_id'] = None
         return
 
-    # Extract Data
     email = app_info.get('developerEmail', '').lower().strip()
     phone = app_info.get('developerPhone')
     if not phone: phone = 'N/A'
 
-    histogram = app_info.get('histogram',[0, 0, 0, 0, 0])
+    histogram = app_info.get('histogram', [0, 0, 0, 0, 0])
     total_ratings = sum(histogram)
     
     data = {
@@ -236,12 +226,11 @@ async def scrape_single_app(query_text, search_type, context, uid, user_name):
     )
     await status_msg.edit_text(res_text, parse_mode='Markdown')
 
-    # Reset State
     session_stats['status'] = "Idle"
     session_stats['active_by_id'] = None
     session_stats['active_by_name'] = None
 
-# --- Bulk Scraper Engine (Existing) ---
+# --- Bulk Scraper Engine ---
 async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
     context.user_data['stop_signal'] = False
     
@@ -535,7 +524,6 @@ async def delete_leads_action(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
 # --- Command Handlers ---
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     if not is_owner(uid): return
@@ -553,8 +541,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👇 Select an action:"
     )
     
-    btns = [[InlineKeyboardButton("✅ Health Check", callback_data='check_health'), InlineKeyboardButton("📥 Download All DB", callback_data='dl_all')],[InlineKeyboardButton("🤖 Auto Mode", callback_data='auto_s'), InlineKeyboardButton("♻️ Reset Bot", callback_data='refresh_bot')],[InlineKeyboardButton("📊 Live Stats", callback_data='stats')],[InlineKeyboardButton("🌍 Set Countries", callback_data='set_countries'), InlineKeyboardButton("🗑 Delete N Leads", callback_data='delete_leads')],
-        # NEW BUTTONS FOR SPECIFIC APP SEARCH[InlineKeyboardButton("🔍 Search by App ID", callback_data='search_by_id'), InlineKeyboardButton("🔎 Search by App Name", callback_data='search_by_name')]
+    # এখানে বাটনগুলো একদম আনহাইড (Uncomment) করে দেওয়া হয়েছে!
+    btns = [[InlineKeyboardButton("✅ Health Check", callback_data='check_health'), InlineKeyboardButton("📥 Download All DB", callback_data='dl_all')],[InlineKeyboardButton("🤖 Auto Mode", callback_data='auto_s'), InlineKeyboardButton("♻️ Reset Bot", callback_data='refresh_bot')],[InlineKeyboardButton("📊 Live Stats", callback_data='stats')],[InlineKeyboardButton("🌍 Set Countries", callback_data='set_countries'), InlineKeyboardButton("🗑 Delete N Leads", callback_data='delete_leads')],[InlineKeyboardButton("🔍 Search by App ID", callback_data='search_by_id'), InlineKeyboardButton("🔎 Search by App Name", callback_data='search_by_name')]
     ]
     await update.message.reply_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(btns))
 
@@ -616,13 +604,12 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await set_countries_action(update, context)
     elif q.data == 'delete_leads':
         await delete_leads_action(update, context)
-    # NEW: Handle Specific App Searches
     elif q.data == 'search_by_id':
         context.user_data['awaiting_app_id'] = True
-        await q.edit_message_text("🆔 **Search by App ID**\n\nPlease send the App ID (e.g., `com.tencent.ig` or link containing it).", parse_mode='Markdown')
+        await q.edit_message_text("🆔 **Search by App ID**\n\nPlease send the App ID (e.g., `com.tencent.ig` or a link containing it).", parse_mode='Markdown')
     elif q.data == 'search_by_name':
         context.user_data['awaiting_app_name'] = True
-        await q.edit_message_text("🔎 **Search by Exact App Name**\n\nPlease send the exact App Name.", parse_mode='Markdown')
+        await q.edit_message_text("🔎 **Search by Exact App Name**\n\nPlease send the exact App Name you want to scrape.", parse_mode='Markdown')
 
 # --- Message Handler ---
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -631,10 +618,9 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = update.message.text.strip()
 
-    # Handle Set Countries
     if context.user_data.get('awaiting_countries'):
-        raw_codes =[code.strip().lower() for code in text.split(',') if code.strip()]
-        valid_codes =[code for code in raw_codes if re.match(r'^[a-z]{2}$', code)]
+        raw_codes = [code.strip().lower() for code in text.split(',') if code.strip()]
+        valid_codes = [code for code in raw_codes if re.match(r'^[a-z]{2}$', code)]
         if not valid_codes:
             await update.message.reply_text("❌ No valid country codes found. Please send codes like: `us,gb,in`", parse_mode='Markdown')
             return
@@ -644,7 +630,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ Country codes saved: {', '.join(valid_codes).upper()}\nThey will be used for future scraping.")
         return
 
-    # Handle Delete N Leads
     if context.user_data.get('awaiting_delete_count'):
         try:
             n = int(text)
@@ -658,10 +643,8 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del context.user_data['awaiting_delete_count']
         return
 
-    # NEW: Handle Search by App ID
     if context.user_data.get('awaiting_app_id'):
         del context.user_data['awaiting_app_id']
-        # Try to extract ID if user sent a full play store link
         app_id = text
         match = re.search(r'id=([a-zA-Z0-9_.]+)', text)
         if match:
@@ -669,13 +652,11 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         active_tasks[uid] = asyncio.create_task(scrape_single_app(app_id, 'id', context, uid, update.effective_user.first_name))
         return
 
-    # NEW: Handle Search by App Name
     if context.user_data.get('awaiting_app_name'):
         del context.user_data['awaiting_app_name']
         active_tasks[uid] = asyncio.create_task(scrape_single_app(text, 'name', context, uid, update.effective_user.first_name))
         return
 
-    # BUSY CHECK for standard keyword scraping
     if session_stats['status'] != "Idle" and not "Stopped" in session_stats['status']:
         if session_stats['active_by_id'] != uid:
             worker_name = session_stats['active_by_name']
@@ -690,7 +671,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
              await update.message.reply_text(f"⚠️ You already have a task running! Press STOP first.")
              return
 
-    # Standard keyword scraping
     user_name = update.effective_user.first_name
     active_tasks[uid] = asyncio.create_task(scrape_task(text, context, uid, user_name))
 
