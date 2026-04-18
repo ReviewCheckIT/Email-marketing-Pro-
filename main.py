@@ -246,6 +246,7 @@ async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
         f"📞 Features: Email + Phone Extraction + Rating Details\n"
         f"💾 Saving to: `scraped_emails`\n"
         f"⏳ Generating Keywords..."
+        f"🌍 Country: `{Country}`\n"
     )
     
     markup = InlineKeyboardMarkup([[InlineKeyboardButton("📊 Live Stats", callback_data='stats'), InlineKeyboardButton("🛑 STOP", callback_data='stop_loop')]
