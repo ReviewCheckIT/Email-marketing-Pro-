@@ -268,7 +268,7 @@ async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
             if kw_idx % 5 == 0:
                 try:
                     await context.bot.edit_message_text(
-                        f"🔄 **Processing...**\n👤 User: {user_name}\n🗂 Key: `{kw}`\n📥 Leads Found: {new_count}\n⏳ Progress: {kw_idx}/{len(keywords)}",
+                        f"🔄 **Processing...**\n🌍 Country: {Country}\n👤 User: {user_name}\n🗂 Key: `{kw}`\n📥 Leads Found: {new_count}\n⏳ Progress: {kw_idx}/{len(keywords)}",
                         chat_id=uid, message_id=status_msg.message_id, parse_mode='Markdown', reply_markup=markup
                     )
                 except: pass
@@ -511,7 +511,7 @@ async def set_countries_action(update: Update, context: ContextTypes.DEFAULT_TYP
     await q.edit_message_text(
         "🌍 **Set Country Codes**\n\n"
         "Please send the country codes you want to use, separated by commas.\n"
-        "Example: `us,gb,in,ca`"
+        "Example: `us,gb,ca`"
     )
 
 async def delete_leads_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
