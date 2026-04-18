@@ -246,7 +246,6 @@ async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
         f"📞 Features: Email + Phone Extraction + Rating Details\n"
         f"💾 Saving to: `scraped_emails`\n"
         f"⏳ Generating Keywords..."
-        f"🌍 Country: `{Country}`\n"
     )
     
     markup = InlineKeyboardMarkup([[InlineKeyboardButton("📊 Live Stats", callback_data='stats'), InlineKeyboardButton("🛑 STOP", callback_data='stop_loop')]
@@ -269,7 +268,7 @@ async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
             if kw_idx % 5 == 0:
                 try:
                     await context.bot.edit_message_text(
-                        f"🔄 **Processing...**\n🌍 Country: {Country}\n👤 User: {user_name}\n🗂 Key: `{kw}`\n📥 Leads Found: {new_count}\n⏳ Progress: {kw_idx}/{len(keywords)}",
+                        f"🔄 **Processing...**\n👤 User: {user_name}\n🗂 Key: `{kw}`\n📥 Leads Found: {new_count}\n⏳ Progress: {kw_idx}/{len(keywords)}",
                         chat_id=uid, message_id=status_msg.message_id, parse_mode='Markdown', reply_markup=markup
                     )
                 except: pass
