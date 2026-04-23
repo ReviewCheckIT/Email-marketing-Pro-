@@ -239,11 +239,12 @@ async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
     session_stats['active_by_id'] = str(uid)
     session_stats['active_by_name'] = user_name
     
+    # 🟢 Update: Status text changed to "NO Ratings (0 Reviews)"
     status_text = (
         f"🚀 **Search Started by {user_name}**\n"
         f"🔑 Keyword: `{base_kw}`\n"
-        f"🎯 Filter: <50k Installs, Score ≤ 3.8, and at least one 1-2⭐ rating\n"
-        f"📞 Features: Email + Phone Extraction + Rating Details\n"
+        f"🎯 Filter: <50k Installs and **NO Ratings (0 Reviews)**\n"
+        f"📞 Features: Email + Phone Extraction + Info\n"
         f"💾 Saving to: `scraped_emails`\n"
         f"⏳ Generating Keywords..."
     )
@@ -292,12 +293,14 @@ async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
                             installs = parse_installs(app.get('installs', '0'))
                             if installs >= 50000: continue
 
-                            score = app.get('score', 0.0)
-                            if score > 3.8: continue
-
+                            # 🟢 Update: Filter for ONLY "NO RATING" Apps
                             histogram = app.get('histogram')
-                            if not histogram or len(histogram) < 5: continue
-                            if histogram[0] == 0 and histogram[1] == 0: continue
+                            if not histogram: 
+                                histogram = [0, 0, 0, 0, 0]
+                                
+                            total_ratings = sum(histogram)
+                            # যদি একটিও রেটিং থাকে তবে অ্যাপটি স্কিপ করবে 
+                            if total_ratings > 0: continue
                             
                             email = app.get('developerEmail', '').lower().strip()
                             if not await validate_email(email): continue
@@ -310,7 +313,6 @@ async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
                             ratings_3 = histogram[2] if len(histogram) > 2 else 0
                             ratings_4 = histogram[3] if len(histogram) > 3 else 0
                             ratings_5 = histogram[4] if len(histogram) > 4 else 0
-                            total_ratings = sum(histogram)
                             
                             safe_key = email.replace('.', '_').replace('@', '_at_')
                             if ref.child(safe_key).get(): continue
@@ -326,7 +328,7 @@ async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
                                 'country': country,
                                 'keyword': kw,
                                 'date': datetime.now().isoformat(),
-                                'score': score,
+                                'score': app.get('score', 0.0),
                                 'total_ratings': total_ratings,
                                 'ratings_1': ratings_1,
                                 'ratings_2': ratings_2,
@@ -340,8 +342,8 @@ async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
                             new_count += 1
                             session_stats['total_leads'] += 1
 
-                        except: continue
-                except: continue
+                        except: continue # অ্যাপ ফেইল হলে লুপ থামবে না, পরের অ্যাপে যাবে
+                except: continue # সার্চ রেজাল্টে এরর হলে লুপ থামবে না
         
         session_stats['status'] = "Idle"
         session_stats['active_by_id'] = None
@@ -541,7 +543,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👇 Select an action:"
     )
     
-    # এখানে বাটনগুলো একদম আনহাইড (Uncomment) করে দেওয়া হয়েছে!
     btns = [[InlineKeyboardButton("✅ Health Check", callback_data='check_health'), InlineKeyboardButton("📥 Download All DB", callback_data='dl_all')],[InlineKeyboardButton("🤖 Auto Mode", callback_data='auto_s'), InlineKeyboardButton("♻️ Reset Bot", callback_data='refresh_bot')],[InlineKeyboardButton("📊 Live Stats", callback_data='stats')],[InlineKeyboardButton("🌍 Set Countries", callback_data='set_countries'), InlineKeyboardButton("🗑 Delete N Leads", callback_data='delete_leads')],[InlineKeyboardButton("🔍 Search by App ID", callback_data='search_by_id'), InlineKeyboardButton("🔎 Search by App Name", callback_data='search_by_name')]
     ]
     await update.message.reply_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(btns))
