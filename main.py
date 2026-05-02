@@ -295,10 +295,11 @@ async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
                             score = app.get('score', 0.0)
                             if score > 3.8: continue
 
-                            histogram = app.get('histogram')
-                            if not histogram or len(histogram) < 5: continue
-                            if histogram[0] == 0 and histogram[1] == 0: continue
-                            
+                            # ৩.৮ এর নিচে বা ০ রেটিং অ্যাপগুলো এলাউ করার জন্য নিচের লাইনটি আপডেট করা হলো
+                            histogram = app.get('histogram') or [0, 0, 0, 0, 0]
+
+                            # আগের 'if not histogram...' এবং 'if histogram[0] == 0...' লাইন দুটি আমরা ডিলিট করে দিয়েছি। 
+                            # এখন ৩.৮ এর নিচে যাই থাকুক, সেটা লিড হিসেবে সেভ হবে।
                             email = app.get('developerEmail', '').lower().strip()
                             if not await validate_email(email): continue
                             
