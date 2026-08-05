@@ -31,12 +31,22 @@ logger = logging.getLogger(__name__)
 # --- Configuration & Env Variables ---
 TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 
-# Multiple Admin Setup: Split IDs by comma
+# Multiple Admin Setup
 OWNER_IDS_ENV = os.environ.get('BOT_OWNER_ID', '')
 OWNER_IDS = [str(oid).strip() for oid in OWNER_IDS_ENV.split(',') if oid.strip()]
 
+# 🟢 Firebase 1: Scraper Database (Primary)
 FB_JSON = os.environ.get('FIREBASE_CREDENTIALS_JSON')
 FB_URL = os.environ.get('FIREBASE_DATABASE_URL')
+
+# 🟢 NEW: Firebase 2: Sender Database (For Duplicate Check)
+FB_URL_2 = os.environ.get('FIREBASE_DATABASE_URL_2')
+# যদি ফায়ারবেস ২ আলাদা প্রজেক্টের হয়, তবে তার JSON দিন, না দিলে প্রাইমারি JSON ব্যবহার করবে।
+FB_JSON_2 = os.environ.get('FIREBASE_CREDENTIALS_JSON_2', FB_JSON) 
+
+# 🟢 IMPORTANT: ফায়ারবেস ২-তে যেই পাথে/ফোল্ডারে সেন্ড করা ডেটা থাকে তার নাম (আপনার অনুযায়ী বদলাতে পারেন)
+SENDER_DB_PATH = os.environ.get('SENDER_DB_PATH', 'sent_emails')
+
 RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL')
 PORT = int(os.environ.get('PORT', '8080'))
 
@@ -56,15 +66,21 @@ session_stats = {
 
 # --- Firebase Initialization ---
 try:
+    # Initialize App 1 (Scraper DB)
     if not firebase_admin._apps:
-        if isinstance(FB_JSON, str):
-            cred_dict = json.loads(FB_JSON)
-        else:
-            cred_dict = FB_JSON
-        cred = credentials.Certificate(cred_dict)
-        firebase_admin.initialize_app(cred, {'databaseURL': FB_URL})
+        cred_dict = json.loads(FB_JSON) if isinstance(FB_JSON, str) else FB_JSON
+        cred1 = credentials.Certificate(cred_dict)
+        firebase_admin.initialize_app(cred1, {'databaseURL': FB_URL})
+    
+    # Initialize App 2 (Sender DB for duplicate checking)
+    if 'sender_db' not in firebase_admin._apps and FB_URL_2:
+        cred2_dict = json.loads(FB_JSON_2) if isinstance(FB_JSON_2, str) else FB_JSON_2
+        cred2 = credentials.Certificate(cred2_dict)
+        firebase_admin.initialize_app(cred2, {'databaseURL': FB_URL_2}, name='sender_db')
+        logger.info("✅ Firebase 2 (Sender DB) Connected for Duplicate Checking")
+
     fs_client = firestore.client()
-    logger.info("✅ Firebase Connected")
+    logger.info("✅ Primary Firebase Connected")
 except Exception as e:
     logger.error(f"❌ Firebase Error: {e}")
     fs_client = None
@@ -73,7 +89,6 @@ except Exception as e:
 def is_owner(uid):
     return str(uid) in OWNER_IDS
 
-# NEW: Back Button Helper Function
 def get_back_markup():
     return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data='go_back')]])
 
@@ -149,7 +164,7 @@ async def delete_n_leads(uid, n, context):
         logger.error(f"Delete error: {e}")
         return 0, f"❌ Error deleting leads: {e}"
 
-# --- NEW: Single App Scraper Engine (By ID or Name) ---
+# --- Single App Scraper Engine ---
 async def scrape_single_app(query_text, search_type, context, uid, user_name):
     session_stats['status'] = f"Running Single: {query_text}"
     session_stats['start_time'] = datetime.now()
@@ -163,7 +178,6 @@ async def scrape_single_app(query_text, search_type, context, uid, user_name):
     
     app_info = None
     try:
-        # UPDATE: Forced country='us' for single app search to get real ratings
         if search_type == 'id':
             app_info = await asyncio.to_thread(app_details, query_text, lang='en', country='us')
         elif search_type == 'name':
@@ -190,10 +204,30 @@ async def scrape_single_app(query_text, search_type, context, uid, user_name):
     email = app_info.get('developerEmail', '').lower().strip()
     phone = app_info.get('developerPhone')
     if not phone: phone = 'N/A'
-
     histogram = app_info.get('histogram', [0, 0, 0, 0, 0])
     total_ratings = sum(histogram)
     
+    # 🟢 NEW: ডুপ্লিকেট চেক লজিক (Firebase 2)
+    safe_key = email.replace('.', '_').replace('@', '_at_') if email else app_info.get('appId').replace('.', '_')
+    
+    if 'sender_db' in firebase_admin._apps:
+        sender_app = firebase_admin.get_app('sender_db')
+        sender_ref = db.reference(SENDER_DB_PATH, app=sender_app)
+        
+        # ডাটাবেস ২-তে চেক করা হচ্ছে
+        is_duplicate = await asyncio.to_thread(lambda: sender_ref.child(safe_key).get())
+        if is_duplicate:
+            await status_msg.edit_text(
+                f"⚠️ **Duplicate Found!**\n\n"
+                f"📱 **App:** {app_info.get('title')}\n"
+                f"📧 **Email:** `{email}`\n\n"
+                f"❌ এই ইমেইলে অলরেডি প্রপোজাল পাঠানো হয়েছে। তাই নতুন করে সেভ করা হলো না।", 
+                parse_mode='Markdown', reply_markup=get_back_markup()
+            )
+            session_stats['status'] = "Idle"
+            session_stats['active_by_id'] = None
+            return
+
     data = {
         'app_name': app_info.get('title'),
         'app_id': app_info.get('appId'),
@@ -202,7 +236,7 @@ async def scrape_single_app(query_text, search_type, context, uid, user_name):
         'phone': phone,
         'website': app_info.get('developerWebsite', 'N/A'),
         'installs': app_info.get('installs'),
-        'country': 'us', # Saving as 'us' since we fetched from US
+        'country': 'us', 
         'keyword': query_text,
         'date': datetime.now().isoformat(),
         'score': app_info.get('score', 0.0),
@@ -215,8 +249,6 @@ async def scrape_single_app(query_text, search_type, context, uid, user_name):
     }
 
     ref = db.reference('scraped_emails')
-    safe_key = email.replace('.', '_').replace('@', '_at_') if email else app_info.get('appId').replace('.', '_')
-    
     ref.child(safe_key).set(data)
     session_stats['total_leads'] += 1
 
@@ -229,7 +261,6 @@ async def scrape_single_app(query_text, search_type, context, uid, user_name):
         f"📥 **Installs:** {data['installs']}\n"
         f"⭐ **Score:** {data['score']} ({data['total_ratings']} ratings)"
     )
-    # Added Back Button
     await status_msg.edit_text(res_text, parse_mode='Markdown', reply_markup=get_back_markup())
 
     session_stats['status'] = "Idle"
@@ -239,7 +270,6 @@ async def scrape_single_app(query_text, search_type, context, uid, user_name):
 # --- Bulk Scraper Engine ---
 async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
     context.user_data['stop_signal'] = False
-    
     session_stats['status'] = f"Running: {base_kw}"
     session_stats['start_time'] = datetime.now()
     session_stats['active_by_id'] = str(uid)
@@ -248,22 +278,25 @@ async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
     status_text = (
         f"🚀 **Search Started by {user_name}**\n"
         f"🔑 Keyword: `{base_kw}`\n"
-        f"🎯 Filter: <50k Installs, Score ≤ 3.8, and at least one 1-2⭐ rating\n"
-        f"📞 Features: Email + Phone Extraction + Rating Details\n"
-        f"🌍 Region: Forced United States\n"
-        f"💾 Saving to: `scraped_emails`\n"
+        f"🎯 Filter: <50k Installs, Score ≤ 3.8\n"
+        f"📡 **Duplicate Check:** Enabled (Across 2 Databases)\n"
         f"⏳ Generating Keywords..."
     )
     
-    markup = InlineKeyboardMarkup([[InlineKeyboardButton("📊 Live Stats", callback_data='stats'), InlineKeyboardButton("🛑 STOP", callback_data='stop_loop')]
-    ])
-    
+    markup = InlineKeyboardMarkup([[InlineKeyboardButton("📊 Live Stats", callback_data='stats'), InlineKeyboardButton("🛑 STOP", callback_data='stop_loop')]])
     status_msg = await context.bot.send_message(uid, status_text, parse_mode='Markdown', reply_markup=markup)
     
     leads =[]
     new_count = 0
-    ref = db.reference('scraped_emails')
+    duplicate_count = 0  # NEW: Track skipped duplicates
     
+    ref = db.reference('scraped_emails') # Firebase 1
+    
+    # 🟢 NEW: Initialize Sender App Reference (Firebase 2)
+    sender_ref = None
+    if 'sender_db' in firebase_admin._apps:
+        sender_ref = db.reference(SENDER_DB_PATH, app=firebase_admin.get_app('sender_db'))
+
     keywords = await get_expanded_keywords(base_kw)
     await context.bot.edit_message_text(f"✅ Generated {len(keywords)} keywords. Starting scraper...", chat_id=uid, message_id=status_msg.message_id, reply_markup=markup)
 
@@ -275,7 +308,7 @@ async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
             if kw_idx % 5 == 0:
                 try:
                     await context.bot.edit_message_text(
-                        f"🔄 **Processing...**\n👤 User: {user_name}\n🗂 Key: `{kw}`\n📥 Leads Found: {new_count}\n⏳ Progress: {kw_idx}/{len(keywords)}",
+                        f"🔄 **Processing...**\n👤 User: {user_name}\n🗂 Key: `{kw}`\n📥 Leads Found: {new_count}\n♻️ Duplicates Skipped: {duplicate_count}\n⏳ Progress: {kw_idx}/{len(keywords)}",
                         chat_id=uid, message_id=status_msg.message_id, parse_mode='Markdown', reply_markup=markup
                     )
                 except: pass
@@ -285,7 +318,6 @@ async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
                 await asyncio.sleep(0.5)
 
                 try:
-                    # UPDATE: Forced country='us' for real search ratings
                     results = await asyncio.to_thread(play_search, kw, n_hits=100, lang='en', country='us')
                     if not results: continue
 
@@ -294,7 +326,6 @@ async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
                         app_id = r['appId']
                         
                         try:
-                            # UPDATE: Forced country='us' for detailed real ratings
                             app = await asyncio.to_thread(app_details, app_id, lang='en', country='us')
                             if not app: continue
 
@@ -304,29 +335,31 @@ async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
                             score = app.get('score', 0.0)
                             if score > 3.8: continue
 
-                            # হিস্টোগ্রাম চেক
                             histogram = app.get('histogram')
-                            
-                            # যদি হিস্টোগ্রাম একদম না থাকে (জিরো রেটিং অ্যাপ)
                             if not histogram: histogram = [0, 0, 0, 0, 0]
                             
-                            # এখন বাকি সব কোড আগের মতোই থাকবে
                             email = app.get('developerEmail', '').lower().strip()
                             if not await validate_email(email): continue
                             
                             phone = app.get('developerPhone')
                             if not phone: phone = 'N/A'
                             
-                            ratings_1 = histogram[0] if len(histogram) > 0 else 0
-                            ratings_2 = histogram[1] if len(histogram) > 1 else 0
-                            ratings_3 = histogram[2] if len(histogram) > 2 else 0
-                            ratings_4 = histogram[3] if len(histogram) > 3 else 0
-                            ratings_5 = histogram[4] if len(histogram) > 4 else 0
-                            total_ratings = sum(histogram)
-                            
                             safe_key = email.replace('.', '_').replace('@', '_at_')
-                            if ref.child(safe_key).get(): continue
+                            
+                            # 🟢 NEW: Dual Database Duplicate Check Logic
+                            
+                            # Check DB 1 (Scraper Database - previously scraped but not sent yet)
+                            if ref.child(safe_key).get(): 
+                                continue
+                            
+                            # Check DB 2 (Sender Database - already emailed)
+                            if sender_ref:
+                                is_already_sent = await asyncio.to_thread(lambda: sender_ref.child(safe_key).get())
+                                if is_already_sent:
+                                    duplicate_count += 1
+                                    continue # Skip this app entirely!
 
+                            # If it passes both checks, save it to DB 1
                             data = {
                                 'app_name': app.get('title'),
                                 'app_id': app_id,
@@ -335,16 +368,16 @@ async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
                                 'phone': phone,
                                 'website': app.get('developerWebsite', 'N/A'),
                                 'installs': app.get('installs'),
-                                'country': 'us', # Saved as us since data is from us
+                                'country': 'us',
                                 'keyword': kw,
                                 'date': datetime.now().isoformat(),
                                 'score': score,
-                                'total_ratings': total_ratings,
-                                'ratings_1': ratings_1,
-                                'ratings_2': ratings_2,
-                                'ratings_3': ratings_3,
-                                'ratings_4': ratings_4,
-                                'ratings_5': ratings_5
+                                'total_ratings': sum(histogram),
+                                'ratings_1': histogram[0] if len(histogram) > 0 else 0,
+                                'ratings_2': histogram[1] if len(histogram) > 1 else 0,
+                                'ratings_3': histogram[2] if len(histogram) > 2 else 0,
+                                'ratings_4': histogram[3] if len(histogram) > 3 else 0,
+                                'ratings_5': histogram[4] if len(histogram) > 4 else 0
                             }
                             
                             ref.child(safe_key).set(data)
@@ -352,11 +385,9 @@ async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
                             new_count += 1
                             session_stats['total_leads'] += 1
 
-                        except Exception as inner_e: 
-                            # UPDATE: Anti-Crash Logic - if one app fails, skip and continue
+                        except Exception: 
                             continue
-                except Exception as outer_e: 
-                    # UPDATE: Anti-Crash Logic - if search fails, skip and continue
+                except Exception: 
                     continue
         
         session_stats['status'] = "Idle"
@@ -380,9 +411,10 @@ async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
             output = io.BytesIO(si.getvalue().encode('utf-8'))
             output.name = f"Leads_{base_kw}.csv"
             
-            await context.bot.send_document(uid, output, caption=f"✅ Done! Found {new_count} leads.\nSaved to: scraped_emails", reply_markup=get_back_markup())
+            final_msg = f"✅ Done! Found {new_count} new leads.\n♻️ Skipped {duplicate_count} already sent emails.\nSaved to: scraped_emails"
+            await context.bot.send_document(uid, output, caption=final_msg, reply_markup=get_back_markup())
         else:
-            await context.bot.send_message(uid, "❌ No valid leads found for this search.", reply_markup=get_back_markup())
+            await context.bot.send_message(uid, f"❌ No new valid leads found.\n(Skipped {duplicate_count} duplicates)", reply_markup=get_back_markup())
 
     except Exception as e:
         await send_log(context, uid, f"Crash Error: {e}")
@@ -416,11 +448,18 @@ async def health_action(update: Update, context: ContextTypes.DEFAULT_TYPE, is_c
     try:
         db.reference('health_check').set({"status": "ok", "time": str(datetime.now())})
         fb_status = "✅ Connected & Writeable"
+        
+        # Check Sender DB Status
+        sender_status = "❌ Not Configured"
+        if 'sender_db' in firebase_admin._apps:
+            sender_status = "✅ Connected (Duplicate Check Active)"
+            
     except Exception as e:
         fb_status = f"❌ Error: {str(e)[:50]}"
+        sender_status = "❌ Error"
     
     tasks = len(active_tasks)
-    msg = f"🩺 **System Diagnosis:**\n\n• Firebase: {fb_status}\n• DB Path: scraped_emails\n• Active Tasks: {tasks}\n• Groq Keys: {len(GROQ_KEYS)}"
+    msg = f"🩺 **System Diagnosis:**\n\n• Primary Firebase: {fb_status}\n• Sender Firebase: {sender_status}\n• Active Tasks: {tasks}\n• Groq Keys: {len(GROQ_KEYS)}"
     
     if is_callback:
         await update.callback_query.edit_message_text(msg, parse_mode='Markdown', reply_markup=get_back_markup())
@@ -605,7 +644,6 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if not is_owner(uid): return
 
-    # NEW: Handle Back Button
     if q.data == 'go_back':
         context.user_data.clear()
         await start(update, context)
