@@ -119,7 +119,7 @@ async def get_expanded_keywords(base_kw):
     
     url = "https://api.groq.com/openai/v1/chat/completions"
     payload = {
-        "model": "qwen/qwen3.8-27b",
+        "model": "openai/gpt-oss-120b",
         "messages":[{"role": "user", "content": f"Generate 100 Play Store search terms for '{base_kw}'. CSV format only."}]
     }
 
