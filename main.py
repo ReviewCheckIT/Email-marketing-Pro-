@@ -113,27 +113,71 @@ async def send_log(context, uid, message):
         await context.bot.send_message(uid, f"🛠 **Log:** {message}", parse_mode='Markdown')
     except: pass
 
-# --- Groq Logic ---
+# --- Free Offline Keyword Expander (No API Needed) ---
+# Llama 3 বন্ধ হওয়ায় এখন 100% ফ্রি লোকাল জেনারেটর ব্যবহার হবে
 async def get_expanded_keywords(base_kw):
-    if not GROQ_KEYS: return [base_kw]
+    base_kw = base_kw.strip()
+    if not base_kw:
+        return []
     
-    url = "https://api.groq.com/openai/v1/chat/completions"
-    payload = {
-        "model": "openai/gpt-oss-120b",
-        "messages":[{"role": "user", "content": f"Generate 100 Play Store search terms for '{base_kw}'. CSV format only."}]
-    }
+    # যদি Groq Key থাকে তাহলে আগে ওটা ট্রাই করবে, না হলে ফ্রি মোড
+    if GROQ_KEYS:
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        payload = {
+            "model": "openai/gpt-oss-120b",
+            "messages":[{"role": "user", "content": f"Generate 100 Play Store search terms for '{base_kw}'. CSV format only."}]
+        }
+        for api_key in GROQ_KEYS:
+            headers = {'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'}
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(url, headers=headers, json=payload, timeout=8) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            res = data['choices'][0]['message']['content']
+                            kws = [k.strip() for k in res.split(',') if k.strip()][:50]
+                            if len(kws) >= 5:
+                                return kws
+            except:
+                continue
 
-    for i, api_key in enumerate(GROQ_KEYS):
-        headers = {'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'}
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=headers, json=payload, timeout=10) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        res = data['choices'][0]['message']['content']
-                        return[k.strip() for k in res.split(',') if k.strip()][:50]
-        except: continue
-    return [base_kw]
+    # --- OFFLINE FREE MODE (50 variations) ---
+    prefixes = ["best", "top", "free", "secure", "pro", "fast", "easy", "trusted", "private", "new", "2024", "2025", "ultimate", "advanced", "simple"]
+    suffixes = ["app", "for android", "android app", "free app", "pro", "2024", "2025", "download", "mobile app", "manager", "tracker", "tool", "secure", "fast", "global"]
+    
+    variations = []
+    seen = set()
+    
+    def add_kw(kw):
+        kw = kw.strip()
+        low = kw.lower()
+        if low not in seen and len(kw) > 2:
+            seen.add(low)
+            variations.append(kw)
+    
+    add_kw(base_kw)
+    
+    for p in prefixes[:10]:
+        add_kw(f"{p} {base_kw}")
+    for s in suffixes[:10]:
+        add_kw(f"{base_kw} {s}")
+    for p in prefixes[:5]:
+        for s in suffixes[:5]:
+            add_kw(f"{p} {base_kw} {s}")
+            if len(variations) >= 50:
+                break
+    
+    # Long-tail for more leads
+    long_tails = [
+        f"{base_kw} for beginners", f"{base_kw} with low fees", f"{base_kw} instant",
+        f"{base_kw} without verification", f"{base_kw} global", f"{base_kw} fast transfer",
+        f"{base_kw} low cost", f"{base_kw} trusted", f"{base_kw} 2024 best",
+        f"{base_kw} alternative", f"{base_kw} similar apps"
+    ]
+    for lt in long_tails:
+        add_kw(lt)
+    
+    return variations[:50]
 
 # --- Load countries from Firebase ---
 async def load_countries():
@@ -315,10 +359,10 @@ async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
 
             for country in countries:
                 if context.user_data.get('stop_signal'): break
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(1.2)
 
                 try:
-                    results = await asyncio.to_thread(play_search, kw, n_hits=100, lang='en', country='us')
+                    results = await asyncio.to_thread(play_search, kw, n_hits=80, lang='en', country=country)
                     if not results: continue
 
                     for r in results:
@@ -326,7 +370,7 @@ async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
                         app_id = r['appId']
                         
                         try:
-                            app = await asyncio.to_thread(app_details, app_id, lang='en', country='us')
+                            app = await asyncio.to_thread(app_details, app_id, lang='en', country=country)
                             if not app: continue
 
                             installs = parse_installs(app.get('installs', '0'))
