@@ -99,6 +99,36 @@ def parse_installs(install_str):
         return int(clean) if clean else 0
     except: return 0
 
+# --- Country Mapping for Developer Address Filtering ---
+COUNTRY_MAP = {
+    'us': ['united states', 'usa', 'america', 'california', 'new york', 'texas'],
+    'gb': ['united kingdom', 'uk', 'england', 'london', 'britain'],
+    'ca': ['canada', 'toronto', 'vancouver'],
+    'au': ['australia', 'sydney', 'melbourne'],
+    'de': ['germany', 'deutschland', 'berlin'],
+    'fr': ['france', 'paris'],
+    'in': ['india', 'mumbai', 'delhi'],
+    'bd': ['bangladesh', 'dhaka'],
+    'pk': ['pakistan', 'karachi', 'lahore'],
+    'ae': ['united arab emirates', 'dubai', 'uae'],
+    'sa': ['saudi arabia', 'riyadh', 'jeddah'],
+}
+
+def check_country_match(app_info, target_country):
+    """Check if developer address contains target country (best effort)"""
+    address = (app_info.get('developerAddress') or '').lower()
+    if not address:
+        return True  # If no address, allow (can't filter)
+    keywords = COUNTRY_MAP.get(target_country.lower(), [target_country.lower()])
+    # If any keyword found in address, it's a match
+    for kw in keywords:
+        if kw in address:
+            return True
+    # If address exists but doesn't match, we still return True for now
+    # Change to False if you want STRICT filtering
+    return True  # Set to False for strict country-only leads
+
+
 async def validate_email(email):
     if not email: return False
     if not re.match(r"[^@]+@[^@]+\.[^@]+", email): return False
@@ -412,7 +442,7 @@ async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
                                 'phone': phone,
                                 'website': app.get('developerWebsite', 'N/A'),
                                 'installs': app.get('installs'),
-                                'country': 'us',
+                                'country': country,
                                 'keyword': kw,
                                 'date': datetime.now().isoformat(),
                                 'score': score,
@@ -442,12 +472,12 @@ async def scrape_task(base_kw, context, uid, user_name, is_auto=False):
             si = io.StringIO()
             cw = csv.writer(si)
             cw.writerow([
-                'Name', 'Icon URL', 'Email', 'Phone', 'Website', 'Installs', 'Country',
+                'Name', 'App ID', 'Icon URL', 'Email', 'Phone', 'Website', 'Installs', 'Country',
                 'Score', 'Total Ratings', '1-Star', '2-Star', '3-Star', '4-Star', '5-Star'
             ])
             for v in leads: 
                 cw.writerow([
-                    v['app_name'], v.get('icon', 'N/A'), v['email'], v.get('phone', 'N/A'), 
+                    v['app_name'], v.get('app_id', 'N/A'), v.get('icon', 'N/A'), v['email'], v.get('phone', 'N/A'), 
                     v['website'], v['installs'], v['country'], v.get('score', 0.0),
                     v.get('total_ratings', 0), v.get('ratings_1', 0), v.get('ratings_2', 0),
                     v.get('ratings_3', 0), v.get('ratings_4', 0), v.get('ratings_5', 0)
@@ -525,7 +555,7 @@ async def download_action(update: Update, context: ContextTypes.DEFAULT_TYPE, is
             si = io.StringIO()
             cw = csv.writer(si)
             cw.writerow([
-                'App Name', 'Icon URL', 'Email', 'Phone', 'Website', 'Installs', 'Country', 'Keyword', 'Date',
+                'App Name', 'App ID', 'Icon URL', 'Email', 'Phone', 'Website', 'Installs', 'Country', 'Keyword', 'Date',
                 'Score', 'Total Ratings', '1-Star', '2-Star', '3-Star', '4-Star', '5-Star'
             ])
             
@@ -533,7 +563,7 @@ async def download_action(update: Update, context: ContextTypes.DEFAULT_TYPE, is
             for key, v in all_data.items():
                 if isinstance(v, dict):
                     cw.writerow([
-                        v.get('app_name', 'N/A'), v.get('icon', 'N/A'), v.get('email', 'N/A'), v.get('phone', 'N/A'),
+                        v.get('app_name', 'N/A'), v.get('app_id', 'N/A'), v.get('icon', 'N/A'), v.get('email', 'N/A'), v.get('phone', 'N/A'),
                         v.get('website', 'N/A'), v.get('installs', 'N/A'), v.get('country', 'N/A'), v.get('keyword', 'N/A'),
                         v.get('date', 'N/A'), v.get('score', 0.0), v.get('total_ratings', 0),
                         v.get('ratings_1', 0), v.get('ratings_2', 0), v.get('ratings_3', 0), v.get('ratings_4', 0), v.get('ratings_5', 0)
