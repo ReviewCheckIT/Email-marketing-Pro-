@@ -836,7 +836,15 @@ async def setup_persistent_menu(app: Application):
     await app.bot.set_my_commands(commands)
     logger.info("✅ Persistent menu set up with commands.")
 
-# --- Main ---
+# --- Main with Health Endpoint for UptimeRobot ---
+from aiohttp import web
+
+async def health_handler(request):
+    return web.Response(text="OK - Bot is alive - UptimeRobot can ping here", status=200)
+
+async def root_handler(request):
+    return web.Response(text="Bot is running. Use /health for UptimeRobot", status=200)
+
 def main():
     if not TOKEN:
         sys.exit("Missing TOKEN")
@@ -858,7 +866,38 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     
     if RENDER_URL:
-        app.run_webhook(listen="0.0.0.0", port=PORT, url_path=TOKEN, webhook_url=f"{RENDER_URL}/{TOKEN}")
+        # Custom aiohttp app with health endpoint + webhook
+        async def telegram_webhook_handler(request):
+            try:
+                data = await request.json()
+                update = Update.de_json(data, app.bot)
+                await app.process_update(update)
+                return web.Response(status=200)
+            except Exception as e:
+                logger.error(f"Webhook error: {e}")
+                return web.Response(status=500)
+
+        web_app = web.Application()
+        web_app.router.add_get("/", root_handler)
+        web_app.router.add_get("/health", health_handler)
+        web_app.router.add_post(f"/{TOKEN}", telegram_webhook_handler)
+
+        # Set webhook in Telegram
+        async def set_webhook_and_run():
+            await app.bot.set_webhook(url=f"{RENDER_URL}/{TOKEN}")
+            await app.initialize()
+            await app.start()
+            runner = web.AppRunner(web_app)
+            await runner.setup()
+            site = web.TCPSite(runner, "0.0.0.0", PORT)
+            await site.start()
+            logger.info(f"✅ Webhook set to {RENDER_URL}/{TOKEN}")
+            logger.info(f"✅ Health endpoint at {RENDER_URL}/health")
+            # Keep running forever
+            while True:
+                await asyncio.sleep(3600)
+
+        loop.run_until_complete(set_webhook_and_run())
     else:
         print("⚠️ No RENDER_URL found. Using Polling...")
         app.run_polling()
